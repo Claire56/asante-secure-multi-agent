@@ -23,6 +23,14 @@ class RunRequest(BaseModel):
     message: str = Field(min_length=1)
     operator_id: str = "user:asante-operator"
 
+@app.get("/")
+async def root():
+    return {
+        "name": "Asante Secure Multi-Agent Application",
+        "status": "running",
+        "docs": "/docs",
+        "health": "/health",
+    }
 
 @app.get("/health")
 def health() -> dict[str, str]:

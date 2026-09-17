@@ -1,3 +1,10 @@
+"""Guest-credit tool with Ruhusa authorization around a fake ledger.
+
+The ledger is a stand-in for a PMS or payment system. Replacing it later should
+not change the invocation, admission, revalidation, and completion sequence
+that fences the side effect.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -25,6 +32,12 @@ class GuestCreditLedger:
     credits: list[dict[str, object]] = field(default_factory=list)
 
     def issue(self, *, reservation_id: str, amount: float, reason: str) -> dict[str, object]:
+        """Record an issued credit and return the ledger row.
+
+        This method is the unprotected side effect. Callers must go through
+        ``SecuredGuestCreditTool.issue_credit`` so Ruhusa can admit and complete
+        the execution first.
+        """
         credit = {
             "reservation_id": reservation_id,
             "amount": amount,
@@ -36,6 +49,8 @@ class GuestCreditLedger:
 
 
 class SecuredGuestCreditTool:
+    """Issue guest credits only after Ruhusa admits and revalidates the action."""
+
     def __init__(self, security: AsanteSecurityRuntime, ledger: GuestCreditLedger) -> None:
         self.security = security
         self.ledger = ledger
@@ -48,9 +63,26 @@ class SecuredGuestCreditTool:
         reason: str,
         task: TaskContext,
     ) -> dict[str, object]:
-        """Authorize, fence, revalidate, then perform the protected side effect."""
+        """Authorize, fence, revalidate, then perform the protected side effect.
+
+        Flow:
+            1. Create a trusted invocation from supervisor -> guest-support agent.
+            2. Ask the execution controller to admit the request.
+            3. Revalidate immediately before the ledger write (TOCTOU fence).
+            4. Write the credit, then complete the execution lifecycle.
+
+        Returns:
+            Issued credit plus policy metadata, or a ``blocked`` payload when
+            Ruhusa denies or requires approval.
+
+        Raises:
+            RuntimeError: The ledger write succeeded but Ruhusa could not mark
+                the execution complete.
+        """
         principal = Principal(principal_id=GUEST_SUPPORT_AGENT_ID, principal_type="agent")
         now = datetime.now(UTC)
+        # Cap invocation lifetime below the task expiry so a long-lived task
+        # cannot reuse a stale grant minutes later.
         invocation_expiry = min(task.expires_at, now + timedelta(minutes=5))
 
         prepared = self.security.invocation_factory.create(
@@ -95,6 +127,7 @@ class SecuredGuestCreditTool:
                 reason=reason,
             )
         except Exception:
+            # Ambiguous outcome: the side effect may or may not have landed.
             self.security.execution_controller.mark_unknown(permit)
             raise
 

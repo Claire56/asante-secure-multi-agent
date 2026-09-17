@@ -1,3 +1,9 @@
+"""Authorization tests for the guest-credit vertical slice.
+
+These tests call the secured tool directly so they assert Ruhusa decisions
+without depending on the OpenAI Agents SDK or a live model.
+"""
+
 from datetime import UTC, datetime, timedelta
 
 from ruhusa import TaskContext
@@ -7,6 +13,7 @@ from asante_secure_multi_agent.tools import GuestCreditLedger, SecuredGuestCredi
 
 
 def _task() -> TaskContext:
+    """Build a short-lived recovery task used by every credit test."""
     return TaskContext(
         task_id="task-test-credit",
         initiated_by="user:claire",
@@ -16,6 +23,7 @@ def _task() -> TaskContext:
 
 
 def test_guest_support_can_issue_small_credit() -> None:
+    """Credits at or below $25 are allowed and written to the ledger."""
     ledger = GuestCreditLedger()
     tool = SecuredGuestCreditTool(build_security_runtime(), ledger)
 
@@ -33,6 +41,7 @@ def test_guest_support_can_issue_small_credit() -> None:
 
 
 def test_credit_above_25_requires_approval_and_does_not_execute() -> None:
+    """Credits above $25 require approval and must not hit the ledger."""
     ledger = GuestCreditLedger()
     tool = SecuredGuestCreditTool(build_security_runtime(), ledger)
 
@@ -49,6 +58,7 @@ def test_credit_above_25_requires_approval_and_does_not_execute() -> None:
 
 
 def test_credit_above_100_is_default_deny() -> None:
+    """Credits above $100 match no allow/approval rule and stay off the ledger."""
     ledger = GuestCreditLedger()
     tool = SecuredGuestCreditTool(build_security_runtime(), ledger)
 

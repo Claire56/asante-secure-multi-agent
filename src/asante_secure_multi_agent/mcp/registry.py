@@ -16,7 +16,7 @@ class TrustedTaskNotFoundError(LookupError):
 
 
 class TrustedTaskRegistry:
-    """Process-local canonical task/delegation registry for Phase 3.
+    """Process-local canonical task/delegation registry for the current in-process deployment.
 
     This is intentionally small and in-memory. A later production deployment in
     which the MCP service runs in a separate process or replica will replace it

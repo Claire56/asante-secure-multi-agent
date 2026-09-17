@@ -1,4 +1,4 @@
-"""Phase 3 tests for the MCP trust boundary around Ruhusa-secured tools."""
+"""MCP trust-boundary regressions preserved through Phase 4."""
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ def _trusted_context() -> tuple[AsanteRunContext, SecuredGuestCreditTool, GuestC
     credit_tool = SecuredGuestCreditTool(security, ledger)
     task = TaskContext(
         task_id=f"task-mcp-{uuid4().hex}",
-        initiated_by="user:claire",
+        initiated_by="oauth:https://dev.asante.local#claire",
         purpose="guest service recovery",
         expires_at=datetime.now(UTC) + timedelta(minutes=30),
     )
@@ -127,3 +127,10 @@ def test_mcp_boundary_preserves_delegation_limit() -> None:
     assert result["status"] == "blocked"
     assert result["effect"] == "deny"
     assert ledger.credits == []
+
+
+def test_default_mcp_url_uses_canonical_trailing_slash() -> None:
+    """Streamable HTTP should call the canonical mount URL without a redirect."""
+    from asante_secure_multi_agent.mcp.client import DEFAULT_ASANTE_MCP_URL
+
+    assert DEFAULT_ASANTE_MCP_URL.endswith("/mcp/")

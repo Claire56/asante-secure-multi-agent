@@ -9,13 +9,13 @@ from uuid import uuid4
 
 from ruhusa import DelegationGrant, Scope, TaskContext
 
+from asante_secure_multi_agent.identity import (
+    GUEST_SUPPORT_WORKLOAD,
+    SUPERVISOR_WORKLOAD,
+)
 from asante_secure_multi_agent.security import (
     build_security_runtime,
     issue_guest_support_delegation,
-)
-from asante_secure_multi_agent.security.runtime import (
-    GUEST_SUPPORT_AGENT_ID,
-    SUPERVISOR_AGENT_ID,
 )
 from asante_secure_multi_agent.tools import GuestCreditLedger, SecuredGuestCreditTool
 
@@ -24,7 +24,7 @@ def _task() -> TaskContext:
     """Build a short-lived recovery task used by every credit test."""
     return TaskContext(
         task_id=f"task-test-credit-{uuid4().hex}",
-        initiated_by="user:claire",
+        initiated_by="oauth:https://dev.asante.local#claire",
         purpose="guest service recovery",
         expires_at=datetime.now(UTC) + timedelta(minutes=30),
     )
@@ -47,12 +47,15 @@ def test_delegation_chain_is_task_bound_registered_and_narrowed() -> None:
     root, child = issue_guest_support_delegation(security, task)
 
     assert root.grantor_id == task.initiated_by
-    assert root.grantee_id == SUPERVISOR_AGENT_ID
+    supervisor_id = security.workload_identities.require(SUPERVISOR_WORKLOAD).principal_id
+    guest_support_id = security.workload_identities.require(GUEST_SUPPORT_WORKLOAD).principal_id
+
+    assert root.grantee_id == supervisor_id
     assert root.task_id == task.task_id
     assert root.scope.max_numeric_arguments["amount"] == 100.0
 
-    assert child.grantor_id == SUPERVISOR_AGENT_ID
-    assert child.grantee_id == GUEST_SUPPORT_AGENT_ID
+    assert child.grantor_id == supervisor_id
+    assert child.grantee_id == guest_support_id
     assert child.task_id == task.task_id
     assert child.scope.max_numeric_arguments["amount"] == 25.0
 
@@ -174,7 +177,7 @@ def test_widened_child_grant_is_denied_even_for_small_action() -> None:
     root = DelegationGrant(
         grant_id=f"grant:{uuid4().hex}",
         grantor_id=task.initiated_by,
-        grantee_id=SUPERVISOR_AGENT_ID,
+        grantee_id=security.workload_identities.require(SUPERVISOR_WORKLOAD).principal_id,
         task_id=task.task_id,
         scope=_credit_scope(25.0),
         issued_at=now,
@@ -182,8 +185,8 @@ def test_widened_child_grant_is_denied_even_for_small_action() -> None:
     )
     widened_child = DelegationGrant(
         grant_id=f"grant:{uuid4().hex}",
-        grantor_id=SUPERVISOR_AGENT_ID,
-        grantee_id=GUEST_SUPPORT_AGENT_ID,
+        grantor_id=security.workload_identities.require(SUPERVISOR_WORKLOAD).principal_id,
+        grantee_id=security.workload_identities.require(GUEST_SUPPORT_WORKLOAD).principal_id,
         task_id=task.task_id,
         scope=_credit_scope(50.0),
         issued_at=now,

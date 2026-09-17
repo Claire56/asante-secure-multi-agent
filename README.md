@@ -4,28 +4,130 @@ A production-style learning application for secure AI-agent operations at Asante
 
 The project is deliberately split into layers:
 
-- **Application/runtime:** FastAPI, OpenAI Agents SDK, Asante workflows.
+- **Operator API:** FastAPI.
+- **Human authentication:** OAuth-style Bearer JWT access tokens.
+- **Agent runtime:** OpenAI Agents SDK.
 - **Agent tool protocol:** MCP over Streamable HTTP.
-- **Authorization boundary:** Ruhusa 0.8.0 for deterministic policy, delegated authority, trusted invocation provenance, tool identity, and execution fencing.
+- **Workload identity:** trusted SPIFFE IDs for Supervisor and Guest Support.
+- **Authorization boundary:** Ruhusa 0.8.0 for delegated authority, policy, trusted invocation provenance, tool identity, revocation semantics, and execution fencing.
 
-## Phase 3 vertical slice: MCP behind the agent, Ruhusa behind MCP
+## Phase 4 vertical slice: authenticated identity before delegated authority
 
-Phase 3 moves the guest-credit action from an in-process Agents SDK `function_tool` to a real MCP tool:
+Phase 4 removes caller-supplied operator identity from request bodies.
 
 ```text
-Operator / Human
-  -> POST /agent/run
-  -> Asante Operations Supervisor
-  -> Guest Support Agent
-  -> Streamable HTTP MCP
-  -> issue_guest_credit
-  -> trusted server-side task lookup
-  -> Ruhusa delegated authorization
-  -> execution claim + revalidation
-  -> mock credit ledger
+Human
+  -> Bearer access token
+  -> FastAPI validates token
+  -> canonical human principal from iss + sub
+  -> Ruhusa task root
+  -> Supervisor SPIFFE identity
+  -> delegated grant
+  -> Guest Support SPIFFE identity
+  -> MCP issue_guest_credit
+  -> trusted task lookup
+  -> Ruhusa authorization + execution revalidation
+  -> credit ledger
 ```
 
-The key security separation is:
+The security distinction is now explicit:
+
+```text
+Authentication
+  Who is this human/workload?
+
+Delegation
+  What authority was passed to this workload?
+
+Authorization
+  May this workload perform this exact action now?
+```
+
+Ruhusa does not become an identity provider. It consumes canonical identities established by trusted application/runtime infrastructure.
+
+## Human identity
+
+Operator-facing protected endpoints use `Authorization: Bearer <access-token>`.
+
+The request body no longer accepts `operator_id`.
+
+The local development verifier validates:
+
+- JWT signature
+- access-token type (`at+jwt`)
+- issuer (`iss`)
+- subject (`sub`)
+- audience (`aud`)
+- expiry (`exp`)
+- issued-at time (`iat`)
+- JWT ID (`jti`)
+- OAuth client ID (`client_id`)
+
+The canonical Ruhusa root principal is derived from the verified issuer/subject pair:
+
+```text
+oauth:https://dev.asante.local#claire
+```
+
+This prevents a caller from choosing another user's identity by changing JSON in the request body.
+
+### Local development token
+
+Phase 4 includes a local token generator so the authentication boundary can be exercised without first configuring an external identity provider.
+
+```bash
+TOKEN=$(uv run python -m asante_secure_multi_agent.identity.dev_token claire)
+echo "$TOKEN"
+```
+
+The development token is HS256 and is only for local learning/testing.
+
+### External JWKS mode
+
+The application also supports asymmetric JWT access-token verification against an external JWKS endpoint.
+
+```bash
+export ASANTE_AUTH_MODE=jwks
+export ASANTE_AUTH_ISSUER="https://your-issuer.example/"
+export ASANTE_AUTH_AUDIENCE="asante-secure-multi-agent"
+export ASANTE_AUTH_JWKS_URL="https://your-issuer.example/.well-known/jwks.json"
+export ASANTE_AUTH_ALGORITHMS="RS256"
+```
+
+This mode expects access tokens compatible with the claims enforced by the Phase 4 verifier. Provider-specific claim mappings can be added later if an IdP uses a different token profile.
+
+## Workload identity
+
+The trusted runtime currently assigns these canonical SPIFFE IDs:
+
+```text
+spiffe://asante.jamiiz.io/agents/supervisor
+spiffe://asante.jamiiz.io/agents/guest-support
+```
+
+These IDs replace application labels such as `agent:asante:supervisor` as Ruhusa principals.
+
+The agents and MCP server still run in one process in Phase 4, so this is **trusted SPIFFE-ID assignment, not yet cryptographic SPIFFE attestation**. When those components are deployed as separate workloads, the `WorkloadIdentityProvider` boundary is where SPIRE/SVID retrieval and verification can be introduced without changing the Ruhusa policy model.
+
+## Delegated credit authority
+
+```text
+Authenticated Human
+  -> Supervisor: guest.credit.issue <= $100
+  -> Guest Support: guest.credit.issue <= $25
+```
+
+Independent Ruhusa policy remains:
+
+- $0 < credit <= $25: **ALLOW**
+- $25 < credit <= $100: **REQUIRE_APPROVAL**
+- credit > $100: **DENY** by default
+
+A handoff does not grant authority. MCP access does not grant authority. A valid identity also does not grant authority. Ruhusa still validates the task-bound delegation chain and the exact proposed action.
+
+## MCP boundary
+
+The Guest Support agent reaches business actions through Streamable HTTP MCP:
 
 ```text
 Model-visible MCP arguments:
@@ -33,73 +135,44 @@ Model-visible MCP arguments:
   amount
   reason
 
-Hidden MCP _meta:
+Hidden MCP metadata:
   task reference
 
 Trusted server-side state:
   TaskContext
   DelegationGrant chain
-  principal/tool identity
+  authenticated human root
+  workload principal identities
 ```
 
-The model never supplies `task_id`, grant objects, principal identity, or the delegation chain as tool arguments. OpenAI's MCP client injects the current task reference in per-call `_meta`; the MCP server resolves the canonical authority objects from `TrustedTaskRegistry` and then calls the existing Ruhusa-secured service.
+The model cannot provide `task_id`, grant objects, human identity, or workload principal IDs as tool arguments.
 
-### Why this matters
-
-MCP answers **how the agent reaches a business capability**.
-
-Ruhusa answers **whether this agent, under this task and delegated authority, may execute this exact side effect**.
-
-Moving a tool behind MCP must not widen authority.
-
-## MCP transport
-
-The application uses Streamable HTTP and mounts the MCP server at:
+The canonical MCP URL is:
 
 ```text
-http://127.0.0.1:8000/mcp
+http://127.0.0.1:8000/mcp/
 ```
 
-`ASANTE_MCP_URL` can override the client URL.
-
-The MCP server currently runs inside the same FastAPI process so Phase 3 can isolate the protocol/trust-boundary learning goal. The task registry is therefore in-memory. A later deployment with a separately scaled MCP service will require shared trusted task state.
-
-## Delegated credit authority
-
-```text
-Operator
-  -> Supervisor: guest.credit.issue <= $100
-  -> Guest Support: guest.credit.issue <= $25
-```
-
-The independent policy layer remains:
-
-- $0 < credit <= $25: **ALLOW**
-- $25 < credit <= $100: **REQUIRE_APPROVAL**
-- credit > $100: **DENY** by default
-
-The ordinary Guest Support path therefore cannot use the policy's approval headroom unless trusted infrastructure explicitly delegates broader authority.
+The trailing slash avoids the redirect discovered by the Phase 3 live integration test.
 
 ## Development control path
 
-The direct development endpoints remain intentionally useful:
+The direct endpoints remain useful for isolating failures:
 
 ```text
+POST /agent/run
+  -> LLM -> MCP -> Ruhusa -> execution
+
 POST /demo/credits
-GET  /demo/credits
+  -> Ruhusa -> execution
+
+GET /demo/credits
+  -> inspect executed credits
 ```
 
-`POST /demo/credits` bypasses the LLM and MCP but **does not bypass Ruhusa**. It lets you distinguish MCP/agent failures from authorization/business-layer failures.
+All three now require authenticated human identity.
 
-## Phase 3 tests
-
-Phase 2 authorization/delegation tests remain in place. Phase 3 adds checks that:
-
-1. unknown or removed task references fail closed;
-2. MCP metadata carries the task reference outside model-visible tool arguments;
-3. the MCP tool schema exposes only business arguments;
-4. a $20 MCP-routed credit reaches the existing Ruhusa-secured execution path; and
-5. a $40 MCP-routed credit is still denied by the $25 delegated authority limit.
+Use `GET /auth/whoami` to inspect the canonical identity derived from your Bearer token.
 
 ## Run locally
 
@@ -107,41 +180,79 @@ Requires Python 3.12+ and `uv`.
 
 ```bash
 uv sync
-cp .env.example .env
 export OPENAI_API_KEY="..."
+export ASANTE_AUTH_MODE=dev
+export ASANTE_DEV_JWT_SECRET="asante-local-development-only-change-me"
 uv run pytest
 uv run uvicorn asante_secure_multi_agent.main:app --reload
 ```
 
-Open:
+Create a development access token:
+
+```bash
+TOKEN=$(uv run python -m asante_secure_multi_agent.identity.dev_token claire)
+```
+
+Open Swagger:
 
 ```text
 http://127.0.0.1:8000/docs
 ```
 
-The MCP endpoint is mounted at:
+Click **Authorize** and paste the token.
+
+First verify identity with:
 
 ```text
-http://127.0.0.1:8000/mcp
+GET /auth/whoami
 ```
 
-Test the full agent -> MCP -> Ruhusa path:
+Expected shape:
+
+```json
+{
+  "principal_id": "oauth:https://dev.asante.local#claire",
+  "subject": "claire",
+  "issuer": "https://dev.asante.local",
+  "audiences": ["asante-secure-multi-agent"],
+  "client_id": "asante-local-cli",
+  "scopes": ["asante:operate"]
+}
+```
+
+Then test the full path:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/agent/run \
+  -H "Authorization: Bearer $TOKEN" \
   -H 'content-type: application/json' \
-  -d '{"message":"Guest R-1001 had a Wi-Fi outage. Issue a $20 service-recovery credit.","operator_id":"user:claire"}'
+  -d '{"message":"Guest R-1001 had a Wi-Fi outage. Issue a $20 service-recovery credit."}'
 ```
 
-Then try the same flow with `$40`. The model may propose it, but the MCP migration does not change the Ruhusa grant: Guest Support still has only $25 of delegated credit authority.
+A $20 credit should execute. A $40 credit should still be blocked because Guest Support has only $25 of delegated authority.
+
+## Phase 4 tests
+
+Phase 4 retains all Phase 1-3 authorization, delegation, MCP, and execution tests and adds identity regressions for:
+
+1. valid access-token identity derivation;
+2. wrong-audience rejection;
+3. rejection of non-access-token JWT types;
+4. removal of `operator_id` from request schemas;
+5. canonical SPIFFE workload IDs;
+6. authenticated human identity as the delegation root;
+7. missing Bearer credential rejection;
+8. Bearer credential -> canonical human resolution; and
+9. canonical `/mcp/` URL enforcement.
 
 ## Roadmap
 
 1. ~~Prove secure tool execution with Ruhusa.~~
 2. ~~Add real supervisor -> specialist delegation grants.~~
 3. ~~Move the guest-credit tool surface to MCP.~~
-4. Add authenticated operator/workload identity.
+4. ~~Add authenticated human identity and trusted workload identity.~~
 5. Add OpenTelemetry traces and security metrics.
 6. Add agent evals and authorization attack tests to CI.
 7. Add durable human approval workflow.
 8. Replace in-memory stores with production backends/shared task state.
+9. Split MCP/agent workloads and replace static SPIFFE assignment with SPIRE/SVID verification.

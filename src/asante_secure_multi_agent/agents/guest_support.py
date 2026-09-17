@@ -1,6 +1,6 @@
 """Guest-support specialist whose business actions are exposed through MCP.
 
-Phase 3 removes the local ``function_tool`` credit surface. The agent discovers
+Phase 3 moved the credit surface from a local ``function_tool`` to MCP. The agent discovers
 and calls ``issue_guest_credit`` from the Asante Guest Operations MCP server;
 Ruhusa remains behind that MCP boundary and independently decides whether the
 side effect may execute.

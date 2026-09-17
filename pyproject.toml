@@ -1,6 +1,6 @@
 [project]
 name = "asante-secure-multi-agent"
-version = "0.3.0"
+version = "0.4.0"
 description = "Secure multi-agent property operations application powered by Ruhusa."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -9,6 +9,7 @@ dependencies = [
   "mcp>=2,<3",
   "openai-agents>=0.3,<1",
   "pydantic>=2.11,<3",
+  "PyJWT[crypto]>=2.10,<3",
   "ruhusa[fastapi]==0.8.0",
   "uvicorn[standard]>=0.35,<1",
 ]

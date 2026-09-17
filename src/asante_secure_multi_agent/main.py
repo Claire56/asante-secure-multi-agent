@@ -46,6 +46,15 @@ class RunRequest(BaseModel):
     message: str = Field(min_length=1)
     operator_id: str = "user:asante-operator"
 
+class DemoCreditRequest(BaseModel):
+    """Direct credit request used to test the secured workflow without the LLM."""
+
+    reservation_id: str = Field(min_length=1)
+    amount: float = Field(gt=0)
+    reason: str = Field(min_length=1)
+    operator_id: str = "user:asante-operator"
+
+
 
 @app.get("/")
 async def root():
@@ -97,8 +106,41 @@ async def run_agent(request: RunRequest) -> dict[str, object]:
         "output": result.final_output,
     }
 
-
 @app.get("/demo/credits")
 def list_demo_credits() -> list[dict[str, object]]:
     """Inspect credits written to the in-memory ledger after agent runs."""
     return ledger.credits
+
+
+@app.post("/demo/credits")
+async def dev_issue_credit(request: DemoCreditRequest) -> dict[str, object]:
+    """Exercise the secured credit workflow directly, without the LLM agents.
+
+    This endpoint bypasses agent orchestration but does NOT bypass Ruhusa.
+    It creates the same task-bound delegation chain used by /agent/run and
+    sends the proposed side effect through the same secured credit tool.
+    """
+    task = TaskContext(
+        task_id=uuid4().hex,
+        initiated_by=request.operator_id,
+        purpose="direct guest credit test",
+        expires_at=datetime.now(UTC) + timedelta(minutes=30),
+    )
+
+    delegation_chain = issue_guest_support_delegation(
+        security,
+        task,
+    )
+
+    result = credit_tool.issue_credit(
+        reservation_id=request.reservation_id,
+        amount=request.amount,
+        reason=request.reason,
+        task=task,
+        delegation_chain=delegation_chain,
+    )
+
+    return {
+        "task_id": task.task_id,
+        **result,
+    }

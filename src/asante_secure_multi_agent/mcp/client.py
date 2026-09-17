@@ -9,7 +9,7 @@ from agents.mcp import MCPServerStreamableHttp, MCPToolMetaContext
 from asante_secure_multi_agent.context import AsanteRunContext
 
 ASANTE_TASK_META_KEY = "asante/task_id"
-DEFAULT_ASANTE_MCP_URL = "http://127.0.0.1:8000/mcp"
+DEFAULT_ASANTE_MCP_URL = "http://127.0.0.1:8000/mcp/"
 
 
 def resolve_asante_mcp_meta(context: MCPToolMetaContext) -> dict[str, str] | None:

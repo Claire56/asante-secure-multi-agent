@@ -1,8 +1,8 @@
 """Guest-credit tool with Ruhusa authorization around a fake ledger.
 
 The ledger is a stand-in for a PMS or payment system. Replacing it later should
-not change the invocation, admission, revalidation, and completion sequence
-that fences the side effect.
+not change the invocation, delegation, admission, revalidation, and completion
+sequence that fences the side effect.
 """
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
-from ruhusa import DecisionEffect, Principal, TaskContext
+from ruhusa import DecisionEffect, DelegationGrant, Principal, TaskContext
 
 from asante_secure_multi_agent.security.runtime import (
     CREDIT_TOOL_ID,
@@ -23,7 +23,7 @@ from asante_secure_multi_agent.security.runtime import (
 
 @dataclass
 class GuestCreditLedger:
-    """Fake external system for phase 1.
+    """Fake external system for the current learning phase.
 
     Replacing this with a real PMS/payment adapter later should not change the Ruhusa
     authorization boundary around it.
@@ -62,14 +62,19 @@ class SecuredGuestCreditTool:
         amount: float,
         reason: str,
         task: TaskContext,
+        delegation_chain: tuple[DelegationGrant, ...],
     ) -> dict[str, object]:
-        """Authorize, fence, revalidate, then perform the protected side effect.
+        """Authorize delegated authority, fence, revalidate, then execute.
 
         Flow:
-            1. Create a trusted invocation from supervisor -> guest-support agent.
-            2. Ask the execution controller to admit the request.
-            3. Revalidate immediately before the ledger write (TOCTOU fence).
-            4. Write the credit, then complete the execution lifecycle.
+            1. Receive the canonical human -> supervisor -> guest-support grants.
+            2. Create trusted invocation provenance for supervisor -> guest-support.
+            3. Ask Ruhusa to validate delegation, provenance, policy, and admission.
+            4. Revalidate immediately before the ledger write (TOCTOU fence).
+            5. Write the credit, then complete the execution lifecycle.
+
+        The delegation chain is required. Agent orchestration by itself is not
+        authority, so this tool has no direct/no-grant execution path in Phase 2.
 
         Returns:
             Issued credit plus policy metadata, or a ``blocked`` payload when
@@ -82,7 +87,7 @@ class SecuredGuestCreditTool:
         principal = Principal(principal_id=GUEST_SUPPORT_AGENT_ID, principal_type="agent")
         now = datetime.now(UTC)
         # Cap invocation lifetime below the task expiry so a long-lived task
-        # cannot reuse a stale grant minutes later.
+        # cannot reuse stale authority minutes later.
         invocation_expiry = min(task.expires_at, now + timedelta(minutes=5))
 
         prepared = self.security.invocation_factory.create(
@@ -95,6 +100,7 @@ class SecuredGuestCreditTool:
             expires_at=invocation_expiry,
             tool_id=CREDIT_TOOL_ID,
             implementation_id=CREDIT_TOOL_IMPLEMENTATION,
+            delegation_chain=delegation_chain,
         )
 
         admission = self.security.execution_controller.begin(prepared.request)

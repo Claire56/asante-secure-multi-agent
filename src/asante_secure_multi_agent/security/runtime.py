@@ -2,8 +2,9 @@
 
 This module is the authorization boundary. Application agents and FastAPI do
 not decide whether a credit may be issued; they prepare a trusted invocation
-and ask Ruhusa. Phase 1 uses in-memory stores so the semantics can be proven
-before persistence and external identity land.
+and ask Ruhusa. Phase 2 keeps the process-local stores from Phase 1, but adds
+trusted canonical grant storage so agent handoffs are backed by real delegated
+authority rather than orchestration alone.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from ruhusa import (
     DecisionEffect,
     ExecutionController,
     InMemoryExecutionStore,
+    InMemoryGrantStore,
     InMemoryInvocationStore,
     InMemoryToolRegistry,
     PolicyRule,
@@ -23,12 +25,13 @@ from ruhusa import (
 )
 from ruhusa.integrations.trusted import TrustedInvocationFactory
 
-# Stable identities used in policy and trusted invocations. Changing these
-# strings without updating policy would silently deny every credit.
+# Stable identities used in policy, delegation grants, and trusted invocations.
+# Changing these strings without updating the corresponding canonical security
+# state would make the affected requests fail closed.
 GUEST_SUPPORT_AGENT_ID = "agent:asante:guest-support"
 SUPERVISOR_AGENT_ID = "agent:asante:supervisor"
 CREDIT_TOOL_ID = "asante.guest-credit"
-CREDIT_TOOL_IMPLEMENTATION = "asante.guest-credit@0.1.0"
+CREDIT_TOOL_IMPLEMENTATION = "asante.guest-credit@0.2.0"
 
 
 @dataclass(frozen=True)
@@ -37,11 +40,13 @@ class AsanteSecurityRuntime:
 
     Attributes:
         authorizer: Policy engine that evaluates trusted invocations.
-        invocation_factory: Creates signed/stored invocations with provenance.
+        grant_store: Canonical registry for trusted delegation grants.
+        invocation_factory: Creates/stores trusted invocation provenance.
         execution_controller: Admission, revalidation, and completion fencing.
     """
 
     authorizer: Ruhusa
+    grant_store: InMemoryGrantStore
     invocation_factory: TrustedInvocationFactory
     execution_controller: ExecutionController
 
@@ -57,16 +62,22 @@ def _credit_at_most(limit: float):
 
 
 def build_security_runtime() -> AsanteSecurityRuntime:
-    """Build the local security boundary for the first Asante vertical slice.
+    """Build the local security boundary for the Asante guest-credit workflow.
 
-    Phase 1 deliberately uses in-memory stores. Production persistence and external
-    identity are later milestones; the authorization semantics stay the same.
+    Phase 2 still uses in-memory stores. The important change is that delegated
+    authority is now registered canonically in ``InMemoryGrantStore`` and is
+    supplied on every delegated tool invocation.
 
-    Credit policy:
+    Policy remains defense in depth:
         - $0 < amount <= $25: ALLOW
         - $25 < amount <= $100: REQUIRE_APPROVAL
-        - amount > $100: default DENY (no matching allow/approval rule)
+        - amount > $100: default DENY
+
+    The default delegation issued to Guest Support is narrower than the policy:
+    it permits at most $25. A broader trusted delegation may reach the approval
+    rule, but the ordinary autonomous path cannot silently widen itself.
     """
+    grant_store = InMemoryGrantStore()
     invocation_store = InMemoryInvocationStore()
     tool_registry = InMemoryToolRegistry()
     tool_registry.register(
@@ -105,11 +116,13 @@ def build_security_runtime() -> AsanteSecurityRuntime:
 
     authorizer = Ruhusa(
         policy_store=policies,
+        grant_store=grant_store,
         invocation_store=invocation_store,
         tool_registry=tool_registry,
     )
     return AsanteSecurityRuntime(
         authorizer=authorizer,
+        grant_store=grant_store,
         invocation_factory=TrustedInvocationFactory(invocation_store),
         execution_controller=ExecutionController(
             authorizer,

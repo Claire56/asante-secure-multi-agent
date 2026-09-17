@@ -1,3 +1,11 @@
+"""Local Ruhusa runtime for the guest-credit vertical slice.
+
+This module is the authorization boundary. Application agents and FastAPI do
+not decide whether a credit may be issued; they prepare a trusted invocation
+and ask Ruhusa. Phase 1 uses in-memory stores so the semantics can be proven
+before persistence and external identity land.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -15,6 +23,8 @@ from ruhusa import (
 )
 from ruhusa.integrations.trusted import TrustedInvocationFactory
 
+# Stable identities used in policy and trusted invocations. Changing these
+# strings without updating policy would silently deny every credit.
 GUEST_SUPPORT_AGENT_ID = "agent:asante:guest-support"
 SUPERVISOR_AGENT_ID = "agent:asante:supervisor"
 CREDIT_TOOL_ID = "asante.guest-credit"
@@ -23,12 +33,22 @@ CREDIT_TOOL_IMPLEMENTATION = "asante.guest-credit@0.1.0"
 
 @dataclass(frozen=True)
 class AsanteSecurityRuntime:
+    """Process-local Ruhusa components shared by secured tools.
+
+    Attributes:
+        authorizer: Policy engine that evaluates trusted invocations.
+        invocation_factory: Creates signed/stored invocations with provenance.
+        execution_controller: Admission, revalidation, and completion fencing.
+    """
+
     authorizer: Ruhusa
     invocation_factory: TrustedInvocationFactory
     execution_controller: ExecutionController
 
 
 def _credit_at_most(limit: float):
+    """Return a policy condition that matches credits in ``(0, limit]`` USD."""
+
     def condition(request) -> bool:
         amount = request.arguments.get("amount")
         return isinstance(amount, (int, float)) and 0 < float(amount) <= limit
@@ -41,6 +61,11 @@ def build_security_runtime() -> AsanteSecurityRuntime:
 
     Phase 1 deliberately uses in-memory stores. Production persistence and external
     identity are later milestones; the authorization semantics stay the same.
+
+    Credit policy:
+        - $0 < amount <= $25: ALLOW
+        - $25 < amount <= $100: REQUIRE_APPROVAL
+        - amount > $100: default DENY (no matching allow/approval rule)
     """
     invocation_store = InMemoryInvocationStore()
     tool_registry = InMemoryToolRegistry()
@@ -52,6 +77,8 @@ def build_security_runtime() -> AsanteSecurityRuntime:
         )
     )
 
+    # Amounts at or below $25 also satisfy the $100 rule, so the ALLOW rule is
+    # listed first and must win for small credits.
     policies = StaticPolicyStore(
         rules=(
             PolicyRule(

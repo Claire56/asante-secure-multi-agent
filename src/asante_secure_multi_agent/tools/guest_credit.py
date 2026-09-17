@@ -74,7 +74,7 @@ class SecuredGuestCreditTool:
             5. Write the credit, then complete the execution lifecycle.
 
         The delegation chain is required. Agent orchestration by itself is not
-        authority, so this tool has no direct/no-grant execution path in Phase 2.
+        authority, so this tool has no direct/no-grant execution path.
 
         Returns:
             Issued credit plus policy metadata, or a ``blocked`` payload when

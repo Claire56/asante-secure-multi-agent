@@ -2,37 +2,69 @@
 
 A production-style learning application for secure AI-agent operations at Asante Stays.
 
-The project is deliberately split into two layers:
+The project is deliberately split into layers:
 
-- **Application/runtime:** OpenAI Agents SDK, Asante workflows, tools, API, telemetry, evals.
+- **Application/runtime:** FastAPI, OpenAI Agents SDK, Asante workflows.
+- **Agent tool protocol:** MCP over Streamable HTTP.
 - **Authorization boundary:** Ruhusa 0.8.0 for deterministic policy, delegated authority, trusted invocation provenance, tool identity, and execution fencing.
 
-## Phase 2 vertical slice: delegated authority
+## Phase 3 vertical slice: MCP behind the agent, Ruhusa behind MCP
 
-The guest service-recovery workflow now separates **agent orchestration** from **authorization delegation**:
+Phase 3 moves the guest-credit action from an in-process Agents SDK `function_tool` to a real MCP tool:
 
 ```text
 Operator / Human
-  -> task-bound authority
+  -> POST /agent/run
   -> Asante Operations Supervisor
-  -> narrower Ruhusa DelegationGrant
   -> Guest Support Agent
-  -> guest credit tool
-  -> trusted invocation record
-  -> Ruhusa delegation + policy authorization
-  -> execution claim
-  -> execution-time revalidation
+  -> Streamable HTTP MCP
+  -> issue_guest_credit
+  -> trusted server-side task lookup
+  -> Ruhusa delegated authorization
+  -> execution claim + revalidation
   -> mock credit ledger
-  -> execution completion
 ```
 
-The OpenAI Agents SDK handoff answers: **which agent should handle the work?**
+The key security separation is:
 
-Ruhusa answers: **what authority did that agent actually receive?**
+```text
+Model-visible MCP arguments:
+  reservation_id
+  amount
+  reason
 
-A handoff does not automatically transfer permission.
+Hidden MCP _meta:
+  task reference
 
-### Default delegated credit authority
+Trusted server-side state:
+  TaskContext
+  DelegationGrant chain
+  principal/tool identity
+```
+
+The model never supplies `task_id`, grant objects, principal identity, or the delegation chain as tool arguments. OpenAI's MCP client injects the current task reference in per-call `_meta`; the MCP server resolves the canonical authority objects from `TrustedTaskRegistry` and then calls the existing Ruhusa-secured service.
+
+### Why this matters
+
+MCP answers **how the agent reaches a business capability**.
+
+Ruhusa answers **whether this agent, under this task and delegated authority, may execute this exact side effect**.
+
+Moving a tool behind MCP must not widen authority.
+
+## MCP transport
+
+The application uses Streamable HTTP and mounts the MCP server at:
+
+```text
+http://127.0.0.1:8000/mcp
+```
+
+`ASANTE_MCP_URL` can override the client URL.
+
+The MCP server currently runs inside the same FastAPI process so Phase 3 can isolate the protocol/trust-boundary learning goal. The task registry is therefore in-memory. A later deployment with a separately scaled MCP service will require shared trusted task state.
+
+## Delegated credit authority
 
 ```text
 Operator
@@ -40,30 +72,34 @@ Operator
   -> Guest Support: guest.credit.issue <= $25
 ```
 
-The child grant must be a subset of the parent grant. Ruhusa validates chain origin, identity continuity, task binding, temporal validity, and scope attenuation before policy evaluation.
-
-### Defense-in-depth policy
-
-The policy layer remains independent of delegation:
+The independent policy layer remains:
 
 - $0 < credit <= $25: **ALLOW**
 - $25 < credit <= $100: **REQUIRE_APPROVAL**
 - credit > $100: **DENY** by default
 
-The ordinary autonomous Guest Support path only receives $25 of authority. A trusted infrastructure path can issue a broader delegation, but policy still requires human approval above $25.
+The ordinary Guest Support path therefore cannot use the policy's approval headroom unless trusted infrastructure explicitly delegates broader authority.
 
-## Phase 2 security tests
+## Development control path
 
-The test suite covers:
+The direct development endpoints remain intentionally useful:
 
-1. canonical human -> supervisor -> Guest Support grants are task-bound and registered;
-2. a $20 credit succeeds under the default delegation chain;
-3. a $40 credit is denied because Guest Support only received $25 of authority;
-4. a broader trusted grant still cannot bypass the human-approval policy;
-5. a grant above the policy ceiling still receives default deny; and
-6. a malicious widened child grant is denied even when the proposed action itself is small.
+```text
+POST /demo/credits
+GET  /demo/credits
+```
 
-The sixth case is important: it proves that authorization is about the **validity of the authority chain**, not merely whether the final action looks harmless.
+`POST /demo/credits` bypasses the LLM and MCP but **does not bypass Ruhusa**. It lets you distinguish MCP/agent failures from authorization/business-layer failures.
+
+## Phase 3 tests
+
+Phase 2 authorization/delegation tests remain in place. Phase 3 adds checks that:
+
+1. unknown or removed task references fail closed;
+2. MCP metadata carries the task reference outside model-visible tool arguments;
+3. the MCP tool schema exposes only business arguments;
+4. a $20 MCP-routed credit reaches the existing Ruhusa-secured execution path; and
+5. a $40 MCP-routed credit is still denied by the $25 delegated authority limit.
 
 ## Run locally
 
@@ -77,7 +113,19 @@ uv run pytest
 uv run uvicorn asante_secure_multi_agent.main:app --reload
 ```
 
-Then try:
+Open:
+
+```text
+http://127.0.0.1:8000/docs
+```
+
+The MCP endpoint is mounted at:
+
+```text
+http://127.0.0.1:8000/mcp
+```
+
+Test the full agent -> MCP -> Ruhusa path:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/agent/run \
@@ -85,23 +133,15 @@ curl -X POST http://127.0.0.1:8000/agent/run \
   -d '{"message":"Guest R-1001 had a Wi-Fi outage. Issue a $20 service-recovery credit.","operator_id":"user:claire"}'
 ```
 
-And compare it with a request outside Guest Support's delegated authority:
-
-```bash
-curl -X POST http://127.0.0.1:8000/agent/run \
-  -H 'content-type: application/json' \
-  -d '{"message":"Guest R-1001 had a Wi-Fi outage. Issue a $40 service-recovery credit.","operator_id":"user:claire"}'
-```
-
-The model may propose the $40 action, but Ruhusa should deny execution because the default Guest Support grant is capped at $25.
+Then try the same flow with `$40`. The model may propose it, but the MCP migration does not change the Ruhusa grant: Guest Support still has only $25 of delegated credit authority.
 
 ## Roadmap
 
 1. ~~Prove secure tool execution with Ruhusa.~~
 2. ~~Add real supervisor -> specialist delegation grants.~~
-3. Move tool surface to MCP.
+3. ~~Move the guest-credit tool surface to MCP.~~
 4. Add authenticated operator/workload identity.
 5. Add OpenTelemetry traces and security metrics.
 6. Add agent evals and authorization attack tests to CI.
 7. Add durable human approval workflow.
-8. Replace in-memory stores with production backends.
+8. Replace in-memory stores with production backends/shared task state.

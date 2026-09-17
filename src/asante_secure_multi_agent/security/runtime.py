@@ -2,7 +2,7 @@
 
 This module is the authorization boundary. Application agents and FastAPI do
 not decide whether a credit may be issued; they prepare a trusted invocation
-and ask Ruhusa. Phase 2 keeps the process-local stores from Phase 1, but adds
+and ask Ruhusa. Phase 3 keeps the process-local stores from Phase 1, but adds
 trusted canonical grant storage so agent handoffs are backed by real delegated
 authority rather than orchestration alone.
 """
@@ -31,7 +31,7 @@ from ruhusa.integrations.trusted import TrustedInvocationFactory
 GUEST_SUPPORT_AGENT_ID = "agent:asante:guest-support"
 SUPERVISOR_AGENT_ID = "agent:asante:supervisor"
 CREDIT_TOOL_ID = "asante.guest-credit"
-CREDIT_TOOL_IMPLEMENTATION = "asante.guest-credit@0.2.0"
+CREDIT_TOOL_IMPLEMENTATION = "asante.guest-credit@0.3.0"
 
 
 @dataclass(frozen=True)
@@ -64,7 +64,7 @@ def _credit_at_most(limit: float):
 def build_security_runtime() -> AsanteSecurityRuntime:
     """Build the local security boundary for the Asante guest-credit workflow.
 
-    Phase 2 still uses in-memory stores. The important change is that delegated
+    Phase 3 still uses in-memory Ruhusa stores. Delegated
     authority is now registered canonically in ``InMemoryGrantStore`` and is
     supplied on every delegated tool invocation.
 

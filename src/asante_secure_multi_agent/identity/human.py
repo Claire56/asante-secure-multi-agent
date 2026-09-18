@@ -18,6 +18,9 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt import InvalidTokenError, PyJWKClient
 from jwt.exceptions import PyJWTError
+from opentelemetry.trace import Status, StatusCode
+
+from asante_secure_multi_agent.telemetry import get_tracer
 
 DEFAULT_AUTH_MODE = "dev"
 DEFAULT_DEV_ISSUER = "https://dev.asante.local"
@@ -213,7 +216,9 @@ def get_access_token_verifier() -> AccessTokenVerifier:
     return build_access_token_verifier()
 
 
+_tracer = get_tracer()
 _bearer = HTTPBearer(auto_error=False)
+
 BearerCredentials = Annotated[
     HTTPAuthorizationCredentials | None,
     Depends(_bearer),
@@ -223,18 +228,35 @@ BearerCredentials = Annotated[
 def require_authenticated_human(
     credentials: BearerCredentials,
 ) -> AuthenticatedHuman:
-    """FastAPI dependency that authenticates the human initiating the task."""
-    if credentials is None or credentials.scheme.lower() != "bearer":
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Bearer access token required",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    try:
-        return get_access_token_verifier().verify(credentials.credentials)
-    except PyJWTError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired access token",
-            headers={"WWW-Authenticate": "Bearer"},
-        ) from exc
+    """Authenticate the human and emit content-free identity telemetry."""
+    with _tracer.start_as_current_span(
+        "asante.identity.verify",
+        attributes={
+            "asante.identity.kind": "human",
+            "asante.auth.scheme": "bearer",
+        },
+    ) as span:
+        if credentials is None or credentials.scheme.lower() != "bearer":
+            span.set_attribute("asante.auth.outcome", "missing_credentials")
+            span.set_status(Status(StatusCode.ERROR))
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Bearer access token required",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        try:
+            human = get_access_token_verifier().verify(credentials.credentials)
+        except PyJWTError as exc:
+            span.set_attribute("asante.auth.outcome", "invalid_token")
+            span.set_attribute("error.type", type(exc).__name__)
+            span.set_status(Status(StatusCode.ERROR))
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or expired access token",
+                headers={"WWW-Authenticate": "Bearer"},
+            ) from exc
+
+        span.set_attribute("asante.auth.outcome", "authenticated")
+        span.set_attribute("asante.auth.audience_count", len(human.audiences))
+        span.set_attribute("asante.auth.scope_count", len(human.scopes))
+        return human

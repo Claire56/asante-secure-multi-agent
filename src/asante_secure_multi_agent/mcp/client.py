@@ -7,6 +7,7 @@ import os
 from agents.mcp import MCPServerStreamableHttp, MCPToolMetaContext
 
 from asante_secure_multi_agent.context import AsanteRunContext
+from asante_secure_multi_agent.telemetry import inject_current_trace_headers
 
 ASANTE_TASK_META_KEY = "asante/task_id"
 DEFAULT_ASANTE_MCP_URL = "http://127.0.0.1:8000/mcp/"
@@ -22,7 +23,7 @@ def resolve_asante_mcp_meta(context: MCPToolMetaContext) -> dict[str, str] | Non
     run_context = context.run_context.context
     if not isinstance(run_context, AsanteRunContext):
         return None
-    return {ASANTE_TASK_META_KEY: run_context.task.task_id}
+    return inject_current_trace_headers({ASANTE_TASK_META_KEY: run_context.task.task_id})
 
 
 def build_guest_operations_mcp_client(
@@ -33,6 +34,7 @@ def build_guest_operations_mcp_client(
         name="Asante Guest Operations MCP",
         params={
             "url": url or os.getenv("ASANTE_MCP_URL", DEFAULT_ASANTE_MCP_URL),
+            "headers": inject_current_trace_headers(),
             "timeout": 10,
         },
         cache_tools_list=True,

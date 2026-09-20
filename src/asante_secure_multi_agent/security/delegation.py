@@ -1,7 +1,7 @@
 """Trusted task-bound delegation for the Asante guest-credit workflow.
 
 Agent SDK handoffs decide *who should work next*. Ruhusa delegation grants decide
-*what authority that next agent actually receives*. Phase 5 preserves the
+*what authority that next agent actually receives*. Phase 6 preserves the
 trusted human/workload identity chain and adds observability around grant issue.
 """
 

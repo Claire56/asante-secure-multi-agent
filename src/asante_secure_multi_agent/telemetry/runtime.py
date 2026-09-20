@@ -24,7 +24,7 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExport
 from opentelemetry.trace import Tracer
 
 SERVICE_NAME = "asante-secure-multi-agent"
-SERVICE_VERSION = "0.5.0"
+SERVICE_VERSION = "0.6.0"
 DEFAULT_EXPORTER = "console"
 
 _TRACER_NAME = "asante-secure-multi-agent"

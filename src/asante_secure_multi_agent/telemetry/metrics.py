@@ -27,6 +27,16 @@ _credit_executions = _meter.create_counter(
     unit="1",
     description="Guest-credit protected side-effect outcomes.",
 )
+_credit_retries = _meter.create_counter(
+    "asante.credit.retries",
+    unit="1",
+    description="Known-safe transient credit-provider retries.",
+)
+_credit_deduplications = _meter.create_counter(
+    "asante.credit.idempotency_deduplications",
+    unit="1",
+    description="Repeated logical credit operations suppressed by idempotency.",
+)
 
 
 def monotonic_time() -> float:
@@ -64,4 +74,23 @@ def record_credit_execution(*, outcome: str) -> None:
             "asante.action": "guest.credit.issue",
             "asante.outcome": outcome,
         },
+    )
+
+
+def record_credit_retry(*, attempt: int) -> None:
+    """Record a bounded retry without high-cardinality business identifiers."""
+    _credit_retries.add(
+        1,
+        {
+            "asante.action": "guest.credit.issue",
+            "asante.retry.attempt": attempt,
+        },
+    )
+
+
+def record_credit_deduplication() -> None:
+    """Record one idempotency suppression event."""
+    _credit_deduplications.add(
+        1,
+        {"asante.action": "guest.credit.issue"},
     )

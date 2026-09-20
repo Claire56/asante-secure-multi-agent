@@ -1,0 +1,523 @@
+"""Deterministic security/reliability eval gate for Phase 6.
+
+The CI gate intentionally avoids a live model call. It evaluates the invariant
+layer that must never become probabilistic: authorization, delegated authority,
+MCP authority hiding, idempotency, bounded retries, and agent safety contracts.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from uuid import uuid4
+
+from ruhusa import DelegationGrant, Scope, TaskContext
+
+from asante_secure_multi_agent.agents import (
+    GUEST_SUPPORT_INSTRUCTIONS,
+    SUPERVISOR_INSTRUCTIONS,
+)
+from asante_secure_multi_agent.context import AsanteRunContext
+from asante_secure_multi_agent.identity import GUEST_SUPPORT_WORKLOAD, SUPERVISOR_WORKLOAD
+from asante_secure_multi_agent.mcp import (
+    TrustedTaskRegistry,
+    build_guest_operations_mcp_server,
+)
+from asante_secure_multi_agent.reliability import (
+    RetryPolicy,
+    TransientCreditProviderError,
+    UnknownOutcomeCreditProviderError,
+)
+from asante_secure_multi_agent.security import (
+    build_security_runtime,
+    issue_guest_support_delegation,
+)
+from asante_secure_multi_agent.tools import GuestCreditLedger, SecuredGuestCreditTool
+
+
+@dataclass(frozen=True)
+class EvalResult:
+    """One deterministic release-gate result."""
+
+    name: str
+    category: str
+    passed: bool
+    critical: bool
+    unauthorized_side_effect: bool = False
+    details: str = ""
+
+
+@dataclass(frozen=True)
+class EvalThresholds:
+    """Hard security/reliability thresholds used in CI."""
+
+    minimum_pass_rate: float = 1.0
+    max_critical_failures: int = 0
+    max_unauthorized_side_effects: int = 0
+
+
+@dataclass(frozen=True)
+class EvalReport:
+    """Serializable release-gate report."""
+
+    passed: bool
+    pass_rate: float
+    total: int
+    passed_count: int
+    failed_count: int
+    critical_failures: int
+    unauthorized_side_effects: int
+    thresholds: EvalThresholds
+    results: tuple[EvalResult, ...]
+
+    def to_dict(self) -> dict[str, object]:
+        """Return a JSON-serializable report."""
+        return asdict(self)
+
+
+def _task(prefix: str) -> TaskContext:
+    return TaskContext(
+        task_id=f"{prefix}-{uuid4().hex}",
+        initiated_by="oauth:https://dev.asante.local#eval-operator",
+        purpose="release-gate evaluation",
+        expires_at=datetime.now(UTC) + timedelta(minutes=30),
+    )
+
+
+def _credit_scope(limit: float) -> Scope:
+    return Scope(
+        actions=frozenset({"guest.credit.issue"}),
+        resource_prefixes=("reservation:",),
+        max_numeric_arguments={"amount": limit},
+    )
+
+
+def _result(
+    name: str,
+    category: str,
+    passed: bool,
+    *,
+    critical: bool,
+    unauthorized_side_effect: bool = False,
+    details: str = "",
+) -> EvalResult:
+    return EvalResult(
+        name=name,
+        category=category,
+        passed=passed,
+        critical=critical,
+        unauthorized_side_effect=unauthorized_side_effect,
+        details=details,
+    )
+
+
+def _eval_small_credit_allowed() -> EvalResult:
+    security = build_security_runtime()
+    ledger = GuestCreditLedger()
+    tool = SecuredGuestCreditTool(security, ledger)
+    task = _task("eval-allow")
+    chain = issue_guest_support_delegation(security, task)
+    result = tool.issue_credit(
+        reservation_id="R-EVAL-ALLOW",
+        amount=20.0,
+        reason="Wi-Fi outage",
+        task=task,
+        delegation_chain=chain,
+    )
+    passed = result.get("status") == "issued" and len(ledger.credits) == 1
+    return _result(
+        "small_credit_allowed",
+        "normal",
+        passed,
+        critical=False,
+        details=f"status={result.get('status')} side_effects={len(ledger.credits)}",
+    )
+
+
+def _eval_approval_required_has_no_side_effect() -> EvalResult:
+    security = build_security_runtime()
+    ledger = GuestCreditLedger()
+    tool = SecuredGuestCreditTool(security, ledger)
+    task = _task("eval-approval")
+    chain = issue_guest_support_delegation(
+        security,
+        task,
+        supervisor_limit=100.0,
+        guest_support_limit=100.0,
+    )
+    result = tool.issue_credit(
+        reservation_id="R-EVAL-APPROVAL",
+        amount=75.0,
+        reason="Extended outage",
+        task=task,
+        delegation_chain=chain,
+    )
+    unauthorized = bool(ledger.credits)
+    passed = (
+        result.get("status") == "blocked"
+        and result.get("effect") == "require_approval"
+        and not unauthorized
+    )
+    return _result(
+        "approval_required_has_no_side_effect",
+        "normal",
+        passed,
+        critical=True,
+        unauthorized_side_effect=unauthorized,
+        details=f"effect={result.get('effect')} side_effects={len(ledger.credits)}",
+    )
+
+
+def _eval_policy_deny_has_no_side_effect() -> EvalResult:
+    security = build_security_runtime()
+    ledger = GuestCreditLedger()
+    tool = SecuredGuestCreditTool(security, ledger)
+    task = _task("eval-policy-deny")
+    chain = issue_guest_support_delegation(
+        security,
+        task,
+        supervisor_limit=200.0,
+        guest_support_limit=200.0,
+    )
+    result = tool.issue_credit(
+        reservation_id="R-EVAL-DENY",
+        amount=150.0,
+        reason="Oversized requested credit",
+        task=task,
+        delegation_chain=chain,
+    )
+    unauthorized = bool(ledger.credits)
+    passed = (
+        result.get("status") == "blocked" and result.get("effect") == "deny" and not unauthorized
+    )
+    return _result(
+        "policy_deny_has_no_side_effect",
+        "normal",
+        passed,
+        critical=True,
+        unauthorized_side_effect=unauthorized,
+        details=f"effect={result.get('effect')} side_effects={len(ledger.credits)}",
+    )
+
+
+def _eval_delegation_limit_bypass_blocked() -> EvalResult:
+    security = build_security_runtime()
+    ledger = GuestCreditLedger()
+    tool = SecuredGuestCreditTool(security, ledger)
+    task = _task("eval-delegation-deny")
+    chain = issue_guest_support_delegation(security, task)
+    result = tool.issue_credit(
+        reservation_id="R-EVAL-DELEGATION",
+        amount=40.0,
+        reason="Attempt above specialist authority",
+        task=task,
+        delegation_chain=chain,
+    )
+    unauthorized = bool(ledger.credits)
+    passed = result.get("status") == "blocked" and not unauthorized
+    return _result(
+        "delegation_limit_bypass_blocked",
+        "attack",
+        passed,
+        critical=True,
+        unauthorized_side_effect=unauthorized,
+        details=f"effect={result.get('effect')} side_effects={len(ledger.credits)}",
+    )
+
+
+def _eval_widened_child_grant_blocked() -> EvalResult:
+    security = build_security_runtime()
+    ledger = GuestCreditLedger()
+    tool = SecuredGuestCreditTool(security, ledger)
+    task = _task("eval-widened-child")
+    now = datetime.now(UTC)
+    supervisor_id = security.workload_identities.require(SUPERVISOR_WORKLOAD).principal_id
+    guest_support_id = security.workload_identities.require(GUEST_SUPPORT_WORKLOAD).principal_id
+    root = DelegationGrant(
+        grant_id=f"grant:{uuid4().hex}",
+        grantor_id=task.initiated_by,
+        grantee_id=supervisor_id,
+        task_id=task.task_id,
+        scope=_credit_scope(25.0),
+        issued_at=now,
+        expires_at=task.expires_at,
+    )
+    widened = DelegationGrant(
+        grant_id=f"grant:{uuid4().hex}",
+        grantor_id=supervisor_id,
+        grantee_id=guest_support_id,
+        task_id=task.task_id,
+        scope=_credit_scope(50.0),
+        issued_at=now,
+        expires_at=task.expires_at,
+    )
+    security.grant_store.register(root)
+    security.grant_store.register(widened)
+
+    try:
+        result = tool.issue_credit(
+            reservation_id="R-EVAL-WIDEN",
+            amount=20.0,
+            reason="Authority expansion attack",
+            task=task,
+            delegation_chain=(root, widened),
+        )
+        fail_closed = result.get("status") == "blocked"
+        detail = f"status={result.get('status')} effect={result.get('effect')}"
+    except Exception as exc:  # noqa: BLE001
+        # Broad exception capture is intentional for this fail-closed eval.
+        fail_closed = True
+        detail = f"fail_closed_exception={type(exc).__name__}"
+
+    unauthorized = bool(ledger.credits)
+    return _result(
+        "widened_child_grant_blocked",
+        "attack",
+        fail_closed and not unauthorized,
+        critical=True,
+        unauthorized_side_effect=unauthorized,
+        details=f"{detail} side_effects={len(ledger.credits)}",
+    )
+
+
+def _eval_cross_task_replay_blocked() -> EvalResult:
+    security = build_security_runtime()
+    ledger = GuestCreditLedger()
+    tool = SecuredGuestCreditTool(security, ledger)
+    original_task = _task("eval-original")
+    replay_task = _task("eval-replay")
+    original_chain = issue_guest_support_delegation(security, original_task)
+
+    try:
+        result = tool.issue_credit(
+            reservation_id="R-EVAL-REPLAY",
+            amount=20.0,
+            reason="Cross-task replay attack",
+            task=replay_task,
+            delegation_chain=original_chain,
+        )
+        fail_closed = result.get("status") == "blocked"
+        detail = f"status={result.get('status')} effect={result.get('effect')}"
+    except Exception as exc:  # noqa: BLE001
+        # Broad exception capture is intentional for this fail-closed eval.
+        fail_closed = True
+        detail = f"fail_closed_exception={type(exc).__name__}"
+
+    unauthorized = bool(ledger.credits)
+    return _result(
+        "cross_task_replay_blocked",
+        "attack",
+        fail_closed and not unauthorized,
+        critical=True,
+        unauthorized_side_effect=unauthorized,
+        details=f"{detail} side_effects={len(ledger.credits)}",
+    )
+
+
+def _eval_mcp_schema_hides_authority() -> EvalResult:
+    security = build_security_runtime()
+    ledger = GuestCreditLedger()
+    tool = SecuredGuestCreditTool(security, ledger)
+    task = _task("eval-mcp-schema")
+    context = AsanteRunContext(
+        task=task,
+        guest_support_delegation=issue_guest_support_delegation(security, task),
+    )
+    registry = TrustedTaskRegistry()
+    registry.register(context)
+    server = build_guest_operations_mcp_server(tool, registry)
+    tools = asyncio.run(server.list_tools())
+    credit_tool = next(item for item in tools if item.name == "issue_guest_credit")
+    properties = set(credit_tool.input_schema.get("properties", {}))
+    forbidden = {"task_id", "delegation_chain", "principal_id", "grant_id"}
+    passed = properties == {"reservation_id", "amount", "reason"} and not (properties & forbidden)
+    return _result(
+        "mcp_schema_hides_authority",
+        "attack",
+        passed,
+        critical=True,
+        details=f"model_visible_fields={sorted(properties)}",
+    )
+
+
+def _eval_idempotent_repeat_is_deduplicated() -> EvalResult:
+    security = build_security_runtime()
+    ledger = GuestCreditLedger()
+    tool = SecuredGuestCreditTool(security, ledger)
+    task = _task("eval-idempotency")
+    chain = issue_guest_support_delegation(security, task)
+    kwargs = {
+        "reservation_id": "R-EVAL-IDEMPOTENT",
+        "amount": 20.0,
+        "reason": "Same logical action retried",
+        "task": task,
+        "delegation_chain": chain,
+    }
+    first = tool.issue_credit(**kwargs)
+    second = tool.issue_credit(**kwargs)
+    passed = (
+        first.get("status") == "issued"
+        and second.get("status") == "issued"
+        and second.get("deduplicated") is True
+        and len(ledger.credits) == 1
+    )
+    return _result(
+        "idempotent_repeat_is_deduplicated",
+        "reliability",
+        passed,
+        critical=True,
+        details=(
+            f"first_deduplicated={first.get('deduplicated')} "
+            f"second_deduplicated={second.get('deduplicated')} "
+            f"side_effects={len(ledger.credits)}"
+        ),
+    )
+
+
+class _FailOnceLedger(GuestCreditLedger):
+    def __init__(self) -> None:
+        super().__init__()
+        self.attempts = 0
+
+    def issue(self, **kwargs) -> dict[str, object]:
+        self.attempts += 1
+        if self.attempts == 1:
+            raise TransientCreditProviderError("simulated known transient failure")
+        return super().issue(**kwargs)
+
+
+class _UnknownOutcomeLedger(GuestCreditLedger):
+    def __init__(self) -> None:
+        super().__init__()
+        self.attempts = 0
+
+    def issue(self, **kwargs) -> dict[str, object]:
+        self.attempts += 1
+        raise UnknownOutcomeCreditProviderError("simulated uncertain provider outcome")
+
+
+def _eval_known_transient_failure_retries_once() -> EvalResult:
+    security = build_security_runtime()
+    ledger = _FailOnceLedger()
+    tool = SecuredGuestCreditTool(
+        security,
+        ledger,
+        retry_policy=RetryPolicy(max_attempts=2, initial_backoff_seconds=0),
+    )
+    task = _task("eval-retry")
+    chain = issue_guest_support_delegation(security, task)
+    result = tool.issue_credit(
+        reservation_id="R-EVAL-RETRY",
+        amount=20.0,
+        reason="Known transient provider failure",
+        task=task,
+        delegation_chain=chain,
+    )
+    passed = result.get("status") == "issued" and ledger.attempts == 2 and len(ledger.credits) == 1
+    return _result(
+        "known_transient_failure_retries_once",
+        "reliability",
+        passed,
+        critical=False,
+        details=f"attempts={ledger.attempts} side_effects={len(ledger.credits)}",
+    )
+
+
+def _eval_unknown_outcome_is_not_retried() -> EvalResult:
+    security = build_security_runtime()
+    ledger = _UnknownOutcomeLedger()
+    tool = SecuredGuestCreditTool(
+        security,
+        ledger,
+        retry_policy=RetryPolicy(max_attempts=4, initial_backoff_seconds=0),
+    )
+    task = _task("eval-unknown")
+    chain = issue_guest_support_delegation(security, task)
+    raised = False
+    try:
+        tool.issue_credit(
+            reservation_id="R-EVAL-UNKNOWN",
+            amount=20.0,
+            reason="Unknown provider outcome",
+            task=task,
+            delegation_chain=chain,
+        )
+    except UnknownOutcomeCreditProviderError:
+        raised = True
+    passed = raised and ledger.attempts == 1 and ledger.credits == []
+    return _result(
+        "unknown_outcome_is_not_retried",
+        "reliability",
+        passed,
+        critical=True,
+        details=f"attempts={ledger.attempts} side_effects={len(ledger.credits)}",
+    )
+
+
+def _eval_agent_safety_instruction_contract() -> EvalResult:
+    guest_contract = (
+        "Never claim a credit was issued unless" in GUEST_SUPPORT_INSTRUCTIONS
+        and "do not alter the amount or retry to bypass it" in GUEST_SUPPORT_INSTRUCTIONS
+    )
+    supervisor_contract = (
+        "Never bypass a denied or approval-required action" in SUPERVISOR_INSTRUCTIONS
+    )
+    passed = guest_contract and supervisor_contract
+    return _result(
+        "agent_safety_instruction_contract",
+        "agent_contract",
+        passed,
+        critical=False,
+        details=f"guest_contract={guest_contract} supervisor_contract={supervisor_contract}",
+    )
+
+
+def run_release_evals(
+    thresholds: EvalThresholds | None = None,
+) -> EvalReport:
+    """Run deterministic cases and apply hard release thresholds."""
+    thresholds = thresholds or EvalThresholds()
+    evaluators = (
+        _eval_small_credit_allowed,
+        _eval_approval_required_has_no_side_effect,
+        _eval_policy_deny_has_no_side_effect,
+        _eval_delegation_limit_bypass_blocked,
+        _eval_widened_child_grant_blocked,
+        _eval_cross_task_replay_blocked,
+        _eval_mcp_schema_hides_authority,
+        _eval_idempotent_repeat_is_deduplicated,
+        _eval_known_transient_failure_retries_once,
+        _eval_unknown_outcome_is_not_retried,
+        _eval_agent_safety_instruction_contract,
+    )
+    results = tuple(evaluator() for evaluator in evaluators)
+    passed_count = sum(item.passed for item in results)
+    failed_count = len(results) - passed_count
+    pass_rate = passed_count / len(results) if results else 0.0
+    critical_failures = sum(item.critical and not item.passed for item in results)
+    unauthorized_side_effects = sum(item.unauthorized_side_effect for item in results)
+    passed = (
+        pass_rate >= thresholds.minimum_pass_rate
+        and critical_failures <= thresholds.max_critical_failures
+        and unauthorized_side_effects <= thresholds.max_unauthorized_side_effects
+    )
+    return EvalReport(
+        passed=passed,
+        pass_rate=pass_rate,
+        total=len(results),
+        passed_count=passed_count,
+        failed_count=failed_count,
+        critical_failures=critical_failures,
+        unauthorized_side_effects=unauthorized_side_effects,
+        thresholds=thresholds,
+        results=results,
+    )
+
+
+def write_report(report: EvalReport, output: Path) -> None:
+    """Write the release-gate report without prompts, tokens, or business payloads."""
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(report.to_dict(), indent=2, sort_keys=True) + "\n")

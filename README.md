@@ -11,6 +11,77 @@ The project is deliberately split into layers:
 - **Workload identity:** trusted SPIFFE IDs for Supervisor and Guest Support.
 - **Authorization boundary:** Ruhusa 0.8.0 for delegated authority, policy, trusted invocation provenance, tool identity, revocation semantics, and execution fencing.
 - **Observability:** OpenTelemetry traces and security/execution metrics, plus an OpenAI Agents tracing bridge.
+- **Reliability:** bounded known-safe retries, server-derived idempotency, and fail-closed unknown outcomes.
+- **Release gate:** deterministic authorization, attack, reliability, and agent-contract evals in GitHub Actions.
+
+## Phase 6 vertical slice: reliability + eval-gated CI
+
+Phase 6 turns the security/reliability properties from documentation into a
+release gate. CI does not need an OpenAI API key: it evaluates deterministic
+invariants that must never depend on model behavior.
+
+```text
+PR / push
+  -> locked dependency sync
+  -> ruff format/lint
+  -> pytest
+  -> deterministic release evals
+       -> normal authorization cases
+       -> delegation attack cases
+       -> MCP authority-boundary checks
+       -> idempotency/retry checks
+       -> agent safety instruction contracts
+  -> PASS only when every gate is green
+```
+
+The release thresholds are intentionally strict:
+
+- deterministic pass rate: **100%**;
+- critical eval failures: **0**;
+- unauthorized side effects: **0**.
+
+Run the same gate locally:
+
+```bash
+uv run python -m asante_secure_multi_agent.evals --output eval-report.json
+```
+
+The command exits non-zero when the release gate fails, so the same behavior can
+block a pull request in GitHub Actions.
+
+### Reliability policy
+
+The protected credit path now distinguishes retry safety:
+
+- `TransientCreditProviderError`: the adapter knows no side effect happened, so
+  a small bounded retry budget may be used;
+- `UnknownOutcomeCreditProviderError`: execution may have happened, so the
+  application does **not** blindly retry and Ruhusa is marked unknown;
+- repeated identical logical credits in the same trusted task use a
+  server-derived idempotency key and are deduplicated.
+
+The model never supplies the idempotency key. It is derived from trusted task ID,
+reservation, action, and amount.
+
+### Deterministic attack/eval catalog
+
+The Phase 6 gate includes cases for:
+
+1. small allowed credit;
+2. approval-required action produces no side effect;
+3. policy-denied action produces no side effect;
+4. delegated-limit bypass attempt;
+5. widened child-grant attack;
+6. cross-task grant replay;
+7. MCP schema authority injection;
+8. duplicate logical execution/idempotency;
+9. known-safe transient retry;
+10. unknown-outcome no-retry behavior; and
+11. Supervisor/Guest Support safety-instruction contracts.
+
+A future live-model eval suite can measure model behavior separately. The CI
+release gate remains deterministic so a security invariant never becomes a
+probabilistic test.
 
 ## Phase 5 vertical slice: end-to-end agent observability
 
@@ -171,7 +242,7 @@ adds tests for:
 3. ~~Move the guest-credit tool surface to MCP.~~
 4. ~~Add authenticated human identity and trusted workload identity.~~
 5. ~~Add OpenTelemetry traces and security metrics.~~
-6. Add agent evals and authorization attack tests to CI.
+6. ~~Add agent evals and authorization attack tests to CI.~~
 7. Add durable human approval workflow.
 8. Replace in-memory stores with production backends/shared task state.
 9. Split MCP/agent workloads and replace static SPIFFE assignment with SPIRE/SVID verification.

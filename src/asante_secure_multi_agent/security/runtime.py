@@ -1,6 +1,6 @@
 """Local Ruhusa runtime for the guest-credit vertical slice.
 
-Phase 5 keeps Ruhusa independent of authentication and telemetry. Human identity is verified
+Phase 6 keeps Ruhusa independent of authentication and telemetry. Human identity is verified
 at the FastAPI boundary, workload identity is supplied by trusted runtime code,
 and Ruhusa consumes only canonical principal IDs and delegation state.
 """
@@ -30,7 +30,7 @@ from asante_secure_multi_agent.identity import (
 )
 
 CREDIT_TOOL_ID = "asante.guest-credit"
-CREDIT_TOOL_IMPLEMENTATION = "asante.guest-credit@0.5.0"
+CREDIT_TOOL_IMPLEMENTATION = "asante.guest-credit@0.6.0"
 
 
 @dataclass(frozen=True)

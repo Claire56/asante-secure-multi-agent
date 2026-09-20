@@ -2,6 +2,11 @@
 
 from agents import Agent
 
+SUPERVISOR_INSTRUCTIONS = (
+    "You coordinate Asante property operations. Delegate guest-support requests "
+    "to the Guest Support Agent. Never bypass a denied or approval-required action."
+)
+
 
 def build_supervisor_agent(guest_support_agent: Agent) -> Agent:
     """Create the top-level coordinator agent.
@@ -12,9 +17,6 @@ def build_supervisor_agent(guest_support_agent: Agent) -> Agent:
     """
     return Agent(
         name="Asante Operations Supervisor",
-        instructions=(
-            "You coordinate Asante property operations. Delegate guest-support requests "
-            "to the Guest Support Agent. Never bypass a denied or approval-required action."
-        ),
+        instructions=SUPERVISOR_INSTRUCTIONS,
         handoffs=[guest_support_agent],
     )

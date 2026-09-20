@@ -1,9 +1,9 @@
 """HTTP entrypoint for the Asante secure multi-agent application.
 
-Phase 5 adds vendor-neutral OpenTelemetry around the trusted identity ->
-delegation -> agent -> MCP -> Ruhusa -> execution path. Human/workload identity
-and authorization behavior remain unchanged; telemetry observes those boundaries
-without becoming part of the security decision.
+Phase 6 adds bounded reliability controls and deterministic release evals on top
+of the trusted identity -> delegation -> agent -> MCP -> Ruhusa -> execution
+path. Security decisions remain in Ruhusa; retries and idempotency operate only
+after authorization and are continuously regression-gated in CI.
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ from asante_secure_multi_agent.mcp import (
     build_guest_operations_mcp_client,
     build_guest_operations_mcp_server,
 )
+from asante_secure_multi_agent.reliability import credit_retry_policy_from_env
 from asante_secure_multi_agent.security import (
     build_security_runtime,
     issue_guest_support_delegation,
@@ -47,7 +48,11 @@ add_trace_processor(OpenAIAgentsOpenTelemetryProcessor(tracer))
 
 security = build_security_runtime()
 ledger = GuestCreditLedger()
-credit_tool = SecuredGuestCreditTool(security, ledger)
+credit_tool = SecuredGuestCreditTool(
+    security,
+    ledger,
+    retry_policy=credit_retry_policy_from_env(),
+)
 trusted_tasks = TrustedTaskRegistry()
 
 AuthenticatedOperator = Annotated[
@@ -74,7 +79,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Asante Secure Multi-Agent Application",
-    version="0.5.0",
+    version="0.6.0",
     lifespan=lifespan,
 )
 app.mount("/mcp", mcp_http_app)
@@ -86,7 +91,7 @@ async def root() -> dict[str, object]:
     """Return service metadata and discovery links for local development."""
     return {
         "name": "Asante Secure Multi-Agent Application",
-        "phase": 5,
+        "phase": 6,
         "status": "running",
         "docs": "/docs",
         "health": "/health",
@@ -95,6 +100,7 @@ async def root() -> dict[str, object]:
         "auth": "Bearer JWT access token",
         "workload_identity": "SPIFFE IDs",
         "observability": "OpenTelemetry",
+        "release_gate": "deterministic security + reliability evals",
         "otel_exporter": telemetry.exporter,
     }
 

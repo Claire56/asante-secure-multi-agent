@@ -1,4 +1,4 @@
-"""Guest-credit side effect fenced by Ruhusa and observed with OpenTelemetry."""
+"""Guest-credit side effect fenced by Ruhusa and protected for safe retries."""
 
 from __future__ import annotations
 
@@ -9,6 +9,12 @@ from opentelemetry.trace import Status, StatusCode
 from ruhusa import DecisionEffect, DelegationGrant, Principal, TaskContext
 
 from asante_secure_multi_agent.identity import GUEST_SUPPORT_WORKLOAD, SUPERVISOR_WORKLOAD
+from asante_secure_multi_agent.reliability import (
+    CreditProvider,
+    RetryPolicy,
+    build_credit_idempotency_key,
+    execute_with_bounded_retry,
+)
 from asante_secure_multi_agent.security.runtime import (
     CREDIT_TOOL_ID,
     CREDIT_TOOL_IMPLEMENTATION,
@@ -18,7 +24,9 @@ from asante_secure_multi_agent.telemetry import get_tracer
 from asante_secure_multi_agent.telemetry.metrics import (
     monotonic_time,
     record_authorization,
+    record_credit_deduplication,
     record_credit_execution,
+    record_credit_retry,
 )
 
 _tracer = get_tracer()
@@ -26,12 +34,28 @@ _tracer = get_tracer()
 
 @dataclass
 class GuestCreditLedger:
-    """Fake external system for the current learning phase."""
+    """Fake external system with server-side idempotency for the learning app."""
 
     credits: list[dict[str, object]] = field(default_factory=list)
+    _by_idempotency_key: dict[str, dict[str, object]] = field(
+        default_factory=dict,
+        repr=False,
+    )
 
-    def issue(self, *, reservation_id: str, amount: float, reason: str) -> dict[str, object]:
-        """Record an issued credit and return the ledger row."""
+    def issue(
+        self,
+        *,
+        reservation_id: str,
+        amount: float,
+        reason: str,
+        idempotency_key: str | None = None,
+    ) -> dict[str, object]:
+        """Record one credit, deduplicating a repeated logical operation."""
+        if idempotency_key is not None:
+            existing = self._by_idempotency_key.get(idempotency_key)
+            if existing is not None:
+                return {**existing, "deduplicated": True}
+
         credit = {
             "reservation_id": reservation_id,
             "amount": amount,
@@ -39,15 +63,24 @@ class GuestCreditLedger:
             "status": "issued",
         }
         self.credits.append(credit)
-        return credit
+        if idempotency_key is not None:
+            self._by_idempotency_key[idempotency_key] = credit
+        return {**credit, "deduplicated": False}
 
 
 class SecuredGuestCreditTool:
     """Issue guest credits only after Ruhusa admits and revalidates the action."""
 
-    def __init__(self, security: AsanteSecurityRuntime, ledger: GuestCreditLedger) -> None:
+    def __init__(
+        self,
+        security: AsanteSecurityRuntime,
+        ledger: CreditProvider,
+        *,
+        retry_policy: RetryPolicy | None = None,
+    ) -> None:
         self.security = security
         self.ledger = ledger
+        self.retry_policy = retry_policy or RetryPolicy()
 
     def issue_credit(
         self,
@@ -160,17 +193,31 @@ class SecuredGuestCreditTool:
                     "reason": live.authorization.reason,
                 }
 
+            idempotency_key = build_credit_idempotency_key(
+                task_id=task.task_id,
+                reservation_id=reservation_id,
+                amount=amount,
+            )
+
             try:
                 with _tracer.start_as_current_span(
-                    "asante.credit.ledger_write",
+                    "asante.credit.provider_write",
                     attributes={"asante.side_effect.system": "in_memory_credit_ledger"},
                 ):
-                    result = self.ledger.issue(
-                        reservation_id=reservation_id,
-                        amount=amount,
-                        reason=reason,
+                    result = execute_with_bounded_retry(
+                        lambda: self.ledger.issue(
+                            reservation_id=reservation_id,
+                            amount=amount,
+                            reason=reason,
+                            idempotency_key=idempotency_key,
+                        ),
+                        policy=self.retry_policy,
+                        on_retry=lambda attempt: record_credit_retry(attempt=attempt),
                     )
             except Exception as exc:
+                # A provider adapter should raise TransientCreditProviderError only when
+                # it knows no side effect happened. Any failure that escapes the bounded
+                # retry loop is conservatively marked unknown in the Ruhusa lifecycle.
                 execution_span.set_status(Status(StatusCode.ERROR))
                 execution_span.set_attribute("error.type", type(exc).__name__)
                 self.security.execution_controller.mark_unknown(permit)
@@ -186,8 +233,12 @@ class SecuredGuestCreditTool:
                     "credit executed but Ruhusa could not complete execution lifecycle"
                 )
 
-            execution_span.set_attribute("asante.execution.outcome", "issued")
-            record_credit_execution(outcome="issued")
+            deduplicated = bool(result.get("deduplicated", False))
+            outcome = "deduplicated" if deduplicated else "issued"
+            if deduplicated:
+                record_credit_deduplication()
+            execution_span.set_attribute("asante.execution.outcome", outcome)
+            record_credit_execution(outcome=outcome)
             return {
                 **result,
                 "effect": DecisionEffect.ALLOW.value,

@@ -7,6 +7,7 @@ import os
 from agents.mcp import MCPServerStreamableHttp, MCPToolMetaContext
 
 from asante_secure_multi_agent.context import AsanteRunContext
+from asante_secure_multi_agent.reliability import mcp_reliability_config_from_env
 from asante_secure_multi_agent.telemetry import inject_current_trace_headers
 
 ASANTE_TASK_META_KEY = "asante/task_id"
@@ -30,15 +31,16 @@ def build_guest_operations_mcp_client(
     url: str | None = None,
 ) -> MCPServerStreamableHttp:
     """Create the local Streamable HTTP MCP client used by Guest Support."""
+    reliability = mcp_reliability_config_from_env()
     return MCPServerStreamableHttp(
         name="Asante Guest Operations MCP",
         params={
             "url": url or os.getenv("ASANTE_MCP_URL", DEFAULT_ASANTE_MCP_URL),
             "headers": inject_current_trace_headers(),
-            "timeout": 10,
+            "timeout": reliability.timeout_seconds,
         },
         cache_tools_list=True,
-        max_retry_attempts=1,
+        max_retry_attempts=reliability.max_retry_attempts,
         use_structured_content=True,
         tool_meta_resolver=resolve_asante_mcp_meta,
     )

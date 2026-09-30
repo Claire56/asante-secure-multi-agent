@@ -9,7 +9,7 @@ from opentelemetry.trace import Status, StatusCode
 
 from asante_secure_multi_agent.telemetry import get_tracer
 from asante_secure_multi_agent.telemetry.metrics import record_mcp_call
-from asante_secure_multi_agent.tools import SecuredGuestCreditTool
+from asante_secure_multi_agent.tools import SecuredGuestCreditTool, SecuredReservationTool
 
 from .client import ASANTE_TASK_META_KEY
 from .registry import TrustedTaskNotFoundError, TrustedTaskRegistry
@@ -37,6 +37,26 @@ def issue_guest_credit_for_trusted_task(
     )
 
 
+def get_reservation_for_trusted_task(
+    *,
+    reservation_tool: SecuredReservationTool,
+    task_registry: TrustedTaskRegistry,
+    task_id: str,
+    reservation_id: str,
+) -> dict[str, object]:
+    """Resolve canonical authority and execute the secured reservation-read path."""
+    run_context = task_registry.require(task_id)
+    return reservation_tool.get_reservation(
+        reservation_id=reservation_id,
+        task=run_context.task,
+        delegation_chain=(
+            run_context.guest_support_reservation_delegation
+            if run_context.guest_support_reservation_delegation is not None
+            else run_context.guest_support_delegation
+        ),
+    )
+
+
 def _mcp_meta(ctx: Context) -> dict[str, object]:
     """Return inbound MCP metadata used for trusted lookup and trace propagation."""
     return dict(ctx.request_context.meta or {})
@@ -58,13 +78,15 @@ def _task_id_from_mcp_context(ctx: Context) -> str:
 def build_guest_operations_mcp_server(
     credit_tool: SecuredGuestCreditTool,
     task_registry: TrustedTaskRegistry,
+    reservation_tool: SecuredReservationTool | None = None,
 ) -> MCPServer:
     """Build the Streamable HTTP MCP server consumed by Guest Support."""
     server = MCPServer(
         "Asante Guest Operations MCP",
         instructions=(
             "Asante guest-operation tools. Tool calls are subject to Ruhusa "
-            "delegated authorization and execution-time revalidation."
+            "delegated authorization and execution-time revalidation. Cached "
+            "reservation results never bypass authorization."
         ),
     )
 
@@ -101,12 +123,51 @@ def build_guest_operations_mcp_server(
             except TrustedTaskNotFoundError as exc:
                 span.set_status(Status(StatusCode.ERROR))
                 span.set_attribute("error.type", "trusted_task_unavailable")
-                record_mcp_call(outcome="error")
+                record_mcp_call(outcome="error", tool_name="issue_guest_credit")
                 raise ToolError("trusted Asante task context is unavailable") from exc
 
             outcome = str(result.get("status", "unknown"))
             span.set_attribute("asante.mcp.outcome", outcome)
-            record_mcp_call(outcome=outcome)
+            record_mcp_call(outcome=outcome, tool_name="issue_guest_credit")
             return result
+
+    if reservation_tool is not None:
+
+        @server.tool(name="get_reservation", structured_output=True)
+        async def get_reservation(
+            reservation_id: str,
+            ctx: Context,
+        ) -> dict[str, object]:
+            """Read reservation data only after live Ruhusa authorization."""
+            meta = _mcp_meta(ctx)
+            task_id = _task_id_from_meta(meta)
+            parent_context = propagate.extract(meta)
+
+            with _tracer.start_as_current_span(
+                "asante.mcp.get_reservation",
+                context=parent_context,
+                attributes={
+                    "mcp.tool.name": "get_reservation",
+                    "asante.action": "reservation.read",
+                    "asante.resource.kind": "reservation",
+                },
+            ) as span:
+                try:
+                    result = get_reservation_for_trusted_task(
+                        reservation_tool=reservation_tool,
+                        task_registry=task_registry,
+                        task_id=task_id,
+                        reservation_id=reservation_id,
+                    )
+                except TrustedTaskNotFoundError as exc:
+                    span.set_status(Status(StatusCode.ERROR))
+                    span.set_attribute("error.type", "trusted_task_unavailable")
+                    record_mcp_call(outcome="error", tool_name="get_reservation")
+                    raise ToolError("trusted Asante task context is unavailable") from exc
+
+                outcome = str(result.get("cache", result.get("status", "unknown")))
+                span.set_attribute("asante.mcp.outcome", outcome)
+                record_mcp_call(outcome=outcome, tool_name="get_reservation")
+                return result
 
     return server

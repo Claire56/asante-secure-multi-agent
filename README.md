@@ -12,7 +12,83 @@ The project is deliberately split into layers:
 - **Authorization boundary:** Ruhusa 0.8.0 for delegated authority, policy, trusted invocation provenance, tool identity, revocation semantics, and execution fencing.
 - **Observability:** OpenTelemetry traces and security/execution metrics, plus an OpenAI Agents tracing bridge.
 - **Reliability:** bounded known-safe retries, server-derived idempotency, and fail-closed unknown outcomes.
-- **Release gate:** deterministic authorization, attack, reliability, and agent-contract evals in GitHub Actions.
+- **Authorization-aware caching:** reservation reads are cached only after live Ruhusa authorization and execution-time revalidation.
+- **Release gate:** deterministic authorization, attack, reliability, cache-disclosure, and agent-contract evals in GitHub Actions.
+
+## Phase 7 vertical slice: authorization-aware caching
+
+Phase 7 adds a protected read capability, `get_reservation`, and an in-memory TTL
+cache that is deliberately placed **after** Ruhusa authorization and execution-time
+revalidation.
+
+```text
+Guest Support
+  -> MCP get_reservation
+  -> trusted task lookup
+  -> Ruhusa authorization
+  -> Ruhusa revalidation
+  -> authorization-aware cache
+       -> HIT: return cached reservation
+       -> MISS: reservation provider -> cache -> return
+```
+
+The central invariant is:
+
+> A cache hit may save an external read, but it may never save the authorization check.
+
+The cache stores reservation data, not Ruhusa `ALLOW` decisions. A revoked grant is
+therefore denied before `cache.get()` is reached, even if the requested reservation
+is still physically present in cache.
+
+### Capability-specific delegation
+
+Credit and reservation-read authority use separate delegation chains. The credit
+chain keeps its `$100 -> $25` numeric attenuation, while the reservation-read chain
+contains only `reservation.read`. This avoids applying credit-specific argument
+constraints to unrelated read actions.
+
+### Cache-key design
+
+The Phase 7 key is derived from stable resource semantics and a schema version:
+
+```text
+reservation-read-v1
+reservation.read
+reservation:<id>
+```
+
+The resulting key is hashed, so raw reservation IDs do not appear in the key. Task
+IDs and grant IDs are intentionally excluded because authorization is checked on
+every read; including ephemeral IDs would prevent useful cross-request cache hits.
+If the representation later becomes tenant-, role-, or user-specific, that security
+context must become part of the cache partition/key.
+
+### Cache security evals
+
+The deterministic gate now includes cache cases for:
+
+1. first authorized read -> cache miss;
+2. repeated authorized read -> cache hit;
+3. different resource -> cache miss;
+4. revoked grant after cache population -> deny with no disclosure;
+5. cross-task replay -> deny with no disclosure;
+6. cache schema-version change -> stale key not reused; and
+7. MCP reservation schema -> no task/grant/principal/cache authority exposed to the model.
+
+The release thresholds now include **zero unauthorized disclosures** in addition to
+zero unauthorized side effects.
+
+### Local cache test
+
+After authorizing in Swagger, call:
+
+```text
+GET /demo/reservations/R-3001
+```
+
+The first response should report `"cache": "miss"`; the next authorized call should
+report `"cache": "hit"` while still creating a fresh Ruhusa task/delegation and
+revalidating authority.
 
 ## Phase 6 vertical slice: reliability + eval-gated CI
 
@@ -243,6 +319,8 @@ adds tests for:
 4. ~~Add authenticated human identity and trusted workload identity.~~
 5. ~~Add OpenTelemetry traces and security metrics.~~
 6. ~~Add agent evals and authorization attack tests to CI.~~
-7. Add durable human approval workflow.
-8. Replace in-memory stores with production backends/shared task state.
-9. Split MCP/agent workloads and replace static SPIFFE assignment with SPIRE/SVID verification.
+7. ~~Add authorization-aware caching with revocation-safe reads.~~
+8. Add durable human approval workflow.
+9. Replace in-memory stores with production backends/shared task state.
+10. Replace the in-memory cache with Redis while preserving the same authorization-before-cache invariant.
+11. Split MCP/agent workloads and replace static SPIFFE assignment with SPIRE/SVID verification.

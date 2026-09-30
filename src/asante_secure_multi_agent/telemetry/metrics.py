@@ -1,4 +1,4 @@
-"""Low-cardinality security and execution metrics for Phase 5."""
+"""Low-cardinality security, execution, and cache metrics."""
 
 from __future__ import annotations
 
@@ -37,6 +37,16 @@ _credit_deduplications = _meter.create_counter(
     unit="1",
     description="Repeated logical credit operations suppressed by idempotency.",
 )
+_cache_lookups = _meter.create_counter(
+    "asante.cache.lookups",
+    unit="1",
+    description="Authorization-aware application-cache lookups by result.",
+)
+_cache_denied_before_lookup = _meter.create_counter(
+    "asante.cache.denied_before_lookup",
+    unit="1",
+    description="Reservation reads denied before sensitive cache access.",
+)
 
 
 def monotonic_time() -> float:
@@ -44,10 +54,16 @@ def monotonic_time() -> float:
     return perf_counter()
 
 
-def record_authorization(*, effect: str, phase: str, duration_seconds: float) -> None:
-    """Record one Ruhusa decision without user, reservation, or prompt data."""
+def record_authorization(
+    *,
+    effect: str,
+    phase: str,
+    duration_seconds: float,
+    action: str = "guest.credit.issue",
+) -> None:
+    """Record one Ruhusa decision without user, resource, or prompt data."""
     attrs = {
-        "asante.action": "guest.credit.issue",
+        "asante.action": action,
         "asante.authorization.effect": effect,
         "asante.authorization.phase": phase,
     }
@@ -55,13 +71,36 @@ def record_authorization(*, effect: str, phase: str, duration_seconds: float) ->
     _authorization_duration.record(duration_seconds, attrs)
 
 
-def record_mcp_call(*, outcome: str) -> None:
-    """Record one MCP credit-tool call outcome."""
+def record_mcp_call(*, outcome: str, tool_name: str = "issue_guest_credit") -> None:
+    """Record one MCP tool-call outcome using a low-cardinality tool name."""
     _mcp_calls.add(
         1,
         {
-            "mcp.tool.name": "issue_guest_credit",
+            "mcp.tool.name": tool_name,
             "asante.outcome": outcome,
+        },
+    )
+
+
+def record_cache_lookup(*, hit: bool, expired: bool = False) -> None:
+    """Record cache behavior without business identifiers or cached values."""
+    outcome = "hit" if hit else "expired" if expired else "miss"
+    _cache_lookups.add(
+        1,
+        {
+            "asante.cache.kind": "reservation",
+            "asante.cache.outcome": outcome,
+        },
+    )
+
+
+def record_cache_denied_before_lookup(*, phase: str) -> None:
+    """Record a Ruhusa denial that prevented cache access entirely."""
+    _cache_denied_before_lookup.add(
+        1,
+        {
+            "asante.cache.kind": "reservation",
+            "asante.authorization.phase": phase,
         },
     )
 

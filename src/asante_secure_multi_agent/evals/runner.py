@@ -1,8 +1,9 @@
-"""Deterministic security/reliability eval gate for Phase 6.
+"""Deterministic security/reliability/cache eval gate for Phase 7.
 
 The CI gate intentionally avoids a live model call. It evaluates the invariant
 layer that must never become probabilistic: authorization, delegated authority,
-MCP authority hiding, idempotency, bounded retries, and agent safety contracts.
+MCP authority hiding, idempotency, bounded retries, cache-disclosure safety, and
+agent safety contracts.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from asante_secure_multi_agent.agents import (
     GUEST_SUPPORT_INSTRUCTIONS,
     SUPERVISOR_INSTRUCTIONS,
 )
+from asante_secure_multi_agent.cache import InMemoryCacheStore, build_reservation_cache_key
 from asante_secure_multi_agent.context import AsanteRunContext
 from asante_secure_multi_agent.identity import GUEST_SUPPORT_WORKLOAD, SUPERVISOR_WORKLOAD
 from asante_secure_multi_agent.mcp import (
@@ -34,8 +36,14 @@ from asante_secure_multi_agent.reliability import (
 from asante_secure_multi_agent.security import (
     build_security_runtime,
     issue_guest_support_delegation,
+    issue_guest_support_reservation_delegation,
 )
-from asante_secure_multi_agent.tools import GuestCreditLedger, SecuredGuestCreditTool
+from asante_secure_multi_agent.tools import (
+    GuestCreditLedger,
+    InMemoryReservationProvider,
+    SecuredGuestCreditTool,
+    SecuredReservationTool,
+)
 
 
 @dataclass(frozen=True)
@@ -47,6 +55,7 @@ class EvalResult:
     passed: bool
     critical: bool
     unauthorized_side_effect: bool = False
+    unauthorized_disclosure: bool = False
     details: str = ""
 
 
@@ -57,6 +66,7 @@ class EvalThresholds:
     minimum_pass_rate: float = 1.0
     max_critical_failures: int = 0
     max_unauthorized_side_effects: int = 0
+    max_unauthorized_disclosures: int = 0
 
 
 @dataclass(frozen=True)
@@ -70,6 +80,7 @@ class EvalReport:
     failed_count: int
     critical_failures: int
     unauthorized_side_effects: int
+    unauthorized_disclosures: int
     thresholds: EvalThresholds
     results: tuple[EvalResult, ...]
 
@@ -102,6 +113,7 @@ def _result(
     *,
     critical: bool,
     unauthorized_side_effect: bool = False,
+    unauthorized_disclosure: bool = False,
     details: str = "",
 ) -> EvalResult:
     return EvalResult(
@@ -110,6 +122,7 @@ def _result(
         passed=passed,
         critical=critical,
         unauthorized_side_effect=unauthorized_side_effect,
+        unauthorized_disclosure=unauthorized_disclosure,
         details=details,
     )
 
@@ -325,6 +338,9 @@ def _eval_mcp_schema_hides_authority() -> EvalResult:
     context = AsanteRunContext(
         task=task,
         guest_support_delegation=issue_guest_support_delegation(security, task),
+        guest_support_reservation_delegation=issue_guest_support_reservation_delegation(
+            security, task
+        ),
     )
     registry = TrustedTaskRegistry()
     registry.register(context)
@@ -457,6 +473,217 @@ def _eval_unknown_outcome_is_not_retried() -> EvalResult:
     )
 
 
+def _reservation_fixture(*, ttl_seconds: float = 300.0):
+    security = build_security_runtime()
+    cache = InMemoryCacheStore()
+    provider = InMemoryReservationProvider()
+    tool = SecuredReservationTool(
+        security,
+        provider,
+        cache,
+        cache_ttl_seconds=ttl_seconds,
+    )
+    task = _task("eval-cache")
+    chain = issue_guest_support_reservation_delegation(security, task)
+    return security, cache, provider, tool, task, chain
+
+
+def _eval_authorized_first_read_is_cache_miss() -> EvalResult:
+    _, cache, provider, tool, task, chain = _reservation_fixture()
+    result = tool.get_reservation(
+        reservation_id="R-3001",
+        task=task,
+        delegation_chain=chain,
+    )
+    passed = (
+        result.get("status") == "found"
+        and result.get("cache") == "miss"
+        and provider.calls == 1
+        and cache.size == 1
+    )
+    return _result(
+        "authorized_first_read_is_cache_miss",
+        "cache",
+        passed,
+        critical=False,
+        details=f"cache={result.get('cache')} provider_calls={provider.calls}",
+    )
+
+
+def _eval_authorized_repeat_is_cache_hit() -> EvalResult:
+    _, _, provider, tool, task, chain = _reservation_fixture()
+    first = tool.get_reservation(
+        reservation_id="R-3001",
+        task=task,
+        delegation_chain=chain,
+    )
+    second = tool.get_reservation(
+        reservation_id="R-3001",
+        task=task,
+        delegation_chain=chain,
+    )
+    passed = first.get("cache") == "miss" and second.get("cache") == "hit" and provider.calls == 1
+    return _result(
+        "authorized_repeat_is_cache_hit",
+        "cache",
+        passed,
+        critical=False,
+        details=(
+            f"first={first.get('cache')} second={second.get('cache')} "
+            f"provider_calls={provider.calls}"
+        ),
+    )
+
+
+def _eval_different_resource_is_cache_miss() -> EvalResult:
+    _, _, provider, tool, task, chain = _reservation_fixture()
+    first = tool.get_reservation(
+        reservation_id="R-3001",
+        task=task,
+        delegation_chain=chain,
+    )
+    second = tool.get_reservation(
+        reservation_id="R-3002",
+        task=task,
+        delegation_chain=chain,
+    )
+    passed = first.get("cache") == "miss" and second.get("cache") == "miss" and provider.calls == 2
+    return _result(
+        "different_resource_is_cache_miss",
+        "cache",
+        passed,
+        critical=False,
+        details=f"provider_calls={provider.calls}",
+    )
+
+
+def _eval_revoked_grant_cannot_read_cached_result() -> EvalResult:
+    security, cache, provider, tool, task, chain = _reservation_fixture()
+    first = tool.get_reservation(
+        reservation_id="R-3001",
+        task=task,
+        delegation_chain=chain,
+    )
+    security.authorizer.revoke_grant(
+        chain[-1].grant_id,
+        reason="release-gate revocation after cache population",
+    )
+    blocked = tool.get_reservation(
+        reservation_id="R-3001",
+        task=task,
+        delegation_chain=chain,
+    )
+    disclosed = "reservation" in blocked
+    passed = (
+        first.get("cache") == "miss"
+        and blocked.get("status") == "blocked"
+        and not disclosed
+        and provider.calls == 1
+        and cache.get_calls == 1
+        and cache.size == 1
+    )
+    return _result(
+        "revoked_grant_cannot_read_cached_result",
+        "attack",
+        passed,
+        critical=True,
+        unauthorized_disclosure=disclosed,
+        details=(
+            f"blocked_effect={blocked.get('effect')} provider_calls={provider.calls} "
+            f"cache_get_calls={cache.get_calls} cache_entries={cache.size} "
+            f"disclosed={disclosed}"
+        ),
+    )
+
+
+def _eval_cross_task_replay_cannot_read_cache() -> EvalResult:
+    _, cache, provider, tool, original_task, chain = _reservation_fixture()
+    first = tool.get_reservation(
+        reservation_id="R-3001",
+        task=original_task,
+        delegation_chain=chain,
+    )
+    replay_task = _task("eval-cache-replay")
+    try:
+        blocked = tool.get_reservation(
+            reservation_id="R-3001",
+            task=replay_task,
+            delegation_chain=chain,
+        )
+        fail_closed = blocked.get("status") == "blocked"
+        disclosed = "reservation" in blocked
+        detail = f"status={blocked.get('status')} effect={blocked.get('effect')}"
+    except Exception as exc:  # noqa: BLE001
+        # Broad capture is intentional: either a DENY or a fail-closed exception is safe.
+        fail_closed = True
+        disclosed = False
+        detail = f"fail_closed_exception={type(exc).__name__}"
+    passed = (
+        first.get("cache") == "miss"
+        and fail_closed
+        and not disclosed
+        and provider.calls == 1
+        and cache.get_calls == 1
+        and cache.size == 1
+    )
+    return _result(
+        "cross_task_replay_cannot_read_cache",
+        "attack",
+        passed,
+        critical=True,
+        unauthorized_disclosure=disclosed,
+        details=(f"{detail} provider_calls={provider.calls} cache_get_calls={cache.get_calls}"),
+    )
+
+
+def _eval_cache_schema_version_changes_key() -> EvalResult:
+    v1 = build_reservation_cache_key("R-3001", schema_version="reservation-read-v1")
+    v2 = build_reservation_cache_key("R-3001", schema_version="reservation-read-v2")
+    passed = v1 != v2 and "R-3001" not in v1 and "R-3001" not in v2
+    return _result(
+        "cache_schema_version_changes_key",
+        "cache",
+        passed,
+        critical=False,
+        details=(
+            f"keys_differ={v1 != v2} "
+            f"raw_resource_hidden={('R-3001' not in v1 and 'R-3001' not in v2)}"
+        ),
+    )
+
+
+def _eval_mcp_reservation_schema_hides_authority() -> EvalResult:
+    security = build_security_runtime()
+    cache = InMemoryCacheStore()
+    provider = InMemoryReservationProvider()
+    reservation_tool = SecuredReservationTool(security, provider, cache)
+    ledger = GuestCreditLedger()
+    credit_tool = SecuredGuestCreditTool(security, ledger)
+    task = _task("eval-mcp-reservation-schema")
+    context = AsanteRunContext(
+        task=task,
+        guest_support_delegation=issue_guest_support_delegation(security, task),
+        guest_support_reservation_delegation=issue_guest_support_reservation_delegation(
+            security, task
+        ),
+    )
+    registry = TrustedTaskRegistry()
+    registry.register(context)
+    server = build_guest_operations_mcp_server(credit_tool, registry, reservation_tool)
+    tools = asyncio.run(server.list_tools())
+    reservation_mcp_tool = next(item for item in tools if item.name == "get_reservation")
+    properties = set(reservation_mcp_tool.input_schema.get("properties", {}))
+    forbidden = {"task_id", "delegation_chain", "principal_id", "grant_id", "cache_key"}
+    passed = properties == {"reservation_id"} and not (properties & forbidden)
+    return _result(
+        "mcp_reservation_schema_hides_authority",
+        "attack",
+        passed,
+        critical=True,
+        details=f"model_visible_fields={sorted(properties)}",
+    )
+
+
 def _eval_agent_safety_instruction_contract() -> EvalResult:
     guest_contract = (
         "Never claim a credit was issued unless" in GUEST_SUPPORT_INSTRUCTIONS
@@ -491,6 +718,13 @@ def run_release_evals(
         _eval_idempotent_repeat_is_deduplicated,
         _eval_known_transient_failure_retries_once,
         _eval_unknown_outcome_is_not_retried,
+        _eval_authorized_first_read_is_cache_miss,
+        _eval_authorized_repeat_is_cache_hit,
+        _eval_different_resource_is_cache_miss,
+        _eval_revoked_grant_cannot_read_cached_result,
+        _eval_cross_task_replay_cannot_read_cache,
+        _eval_cache_schema_version_changes_key,
+        _eval_mcp_reservation_schema_hides_authority,
         _eval_agent_safety_instruction_contract,
     )
     results = tuple(evaluator() for evaluator in evaluators)
@@ -499,10 +733,12 @@ def run_release_evals(
     pass_rate = passed_count / len(results) if results else 0.0
     critical_failures = sum(item.critical and not item.passed for item in results)
     unauthorized_side_effects = sum(item.unauthorized_side_effect for item in results)
+    unauthorized_disclosures = sum(item.unauthorized_disclosure for item in results)
     passed = (
         pass_rate >= thresholds.minimum_pass_rate
         and critical_failures <= thresholds.max_critical_failures
         and unauthorized_side_effects <= thresholds.max_unauthorized_side_effects
+        and unauthorized_disclosures <= thresholds.max_unauthorized_disclosures
     )
     return EvalReport(
         passed=passed,
@@ -512,6 +748,7 @@ def run_release_evals(
         failed_count=failed_count,
         critical_failures=critical_failures,
         unauthorized_side_effects=unauthorized_side_effects,
+        unauthorized_disclosures=unauthorized_disclosures,
         thresholds=thresholds,
         results=results,
     )

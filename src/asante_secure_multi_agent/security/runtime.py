@@ -1,8 +1,8 @@
-"""Local Ruhusa runtime for the guest-credit vertical slice.
+"""Local Ruhusa runtime for secured Asante guest operations.
 
-Phase 6 keeps Ruhusa independent of authentication and telemetry. Human identity is verified
-at the FastAPI boundary, workload identity is supplied by trusted runtime code,
-and Ruhusa consumes only canonical principal IDs and delegation state.
+Phase 7 adds a protected reservation-read tool alongside the existing guest-credit
+write path. Ruhusa remains independent of authentication, MCP, telemetry, and
+caching. Cache hits never bypass authorization or execution-time revalidation.
 """
 
 from __future__ import annotations
@@ -30,7 +30,9 @@ from asante_secure_multi_agent.identity import (
 )
 
 CREDIT_TOOL_ID = "asante.guest-credit"
-CREDIT_TOOL_IMPLEMENTATION = "asante.guest-credit@0.6.0"
+CREDIT_TOOL_IMPLEMENTATION = "asante.guest-credit@0.7.0"
+RESERVATION_TOOL_ID = "asante.reservation-reader"
+RESERVATION_TOOL_IMPLEMENTATION = "asante.reservation-reader@0.7.0"
 
 
 @dataclass(frozen=True)
@@ -57,13 +59,7 @@ def _credit_at_most(limit: float):
 def build_security_runtime(
     workload_identities: WorkloadIdentityProvider | None = None,
 ) -> AsanteSecurityRuntime:
-    """Build the local security boundary for the Asante guest-credit workflow.
-
-    Workload identity is resolved by trusted infrastructure rather than supplied
-    by the model or HTTP request. The default provider assigns SPIFFE IDs to the
-    in-process Supervisor and Guest Support workloads. A later SPIRE-backed
-    provider can replace it without changing Ruhusa policy or tool contracts.
-    """
+    """Build the local security boundary for Asante guest-operation workflows."""
     identity_provider = workload_identities or StaticSpiffeWorkloadIdentityProvider()
     guest_support_id = identity_provider.require(GUEST_SUPPORT_WORKLOAD).principal_id
 
@@ -77,9 +73,24 @@ def build_security_runtime(
             allowed_actions=frozenset({"guest.credit.issue"}),
         )
     )
+    tool_registry.register(
+        ToolRegistration(
+            tool_id=RESERVATION_TOOL_ID,
+            implementation_id=RESERVATION_TOOL_IMPLEMENTATION,
+            allowed_actions=frozenset({"reservation.read"}),
+        )
+    )
 
     policies = StaticPolicyStore(
         rules=(
+            PolicyRule(
+                policy_id="guest-support-reservation-read",
+                effect=DecisionEffect.ALLOW,
+                actions=frozenset({"reservation.read"}),
+                principal_ids=frozenset({guest_support_id}),
+                resource_prefixes=("reservation:",),
+                reason="guest support may read reservations within delegated scope",
+            ),
             PolicyRule(
                 policy_id="guest-support-small-credit",
                 effect=DecisionEffect.ALLOW,

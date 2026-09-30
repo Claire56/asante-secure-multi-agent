@@ -1,9 +1,9 @@
 """HTTP entrypoint for the Asante secure multi-agent application.
 
-Phase 6 adds bounded reliability controls and deterministic release evals on top
-of the trusted identity -> delegation -> agent -> MCP -> Ruhusa -> execution
-path. Security decisions remain in Ruhusa; retries and idempotency operate only
-after authorization and are continuously regression-gated in CI.
+Phase 7 adds authorization-aware reservation caching on top of the trusted
+identity -> delegation -> agent -> MCP -> Ruhusa -> execution path. Every cache
+lookup is preceded by live Ruhusa authorization and revalidation, so stale cached
+data cannot bypass revocation or task-bound authority.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from ruhusa import TaskContext
 
 from asante_secure_multi_agent.agents import build_guest_support_agent, build_supervisor_agent
 from asante_secure_multi_agent.api_models import DemoCreditRequest, RunRequest
+from asante_secure_multi_agent.cache import InMemoryCacheStore
 from asante_secure_multi_agent.context import AsanteRunContext
 from asante_secure_multi_agent.identity import AuthenticatedHuman, require_authenticated_human
 from asante_secure_multi_agent.mcp import (
@@ -32,6 +33,7 @@ from asante_secure_multi_agent.reliability import credit_retry_policy_from_env
 from asante_secure_multi_agent.security import (
     build_security_runtime,
     issue_guest_support_delegation,
+    issue_guest_support_reservation_delegation,
 )
 from asante_secure_multi_agent.telemetry import (
     OpenAIAgentsOpenTelemetryProcessor,
@@ -40,7 +42,12 @@ from asante_secure_multi_agent.telemetry import (
     get_tracer,
     instrument_fastapi,
 )
-from asante_secure_multi_agent.tools import GuestCreditLedger, SecuredGuestCreditTool
+from asante_secure_multi_agent.tools import (
+    GuestCreditLedger,
+    InMemoryReservationProvider,
+    SecuredGuestCreditTool,
+    SecuredReservationTool,
+)
 
 telemetry = configure_telemetry()
 tracer = get_tracer()
@@ -53,6 +60,13 @@ credit_tool = SecuredGuestCreditTool(
     ledger,
     retry_policy=credit_retry_policy_from_env(),
 )
+reservation_cache = InMemoryCacheStore()
+reservation_provider = InMemoryReservationProvider()
+reservation_tool = SecuredReservationTool(
+    security,
+    reservation_provider,
+    reservation_cache,
+)
 trusted_tasks = TrustedTaskRegistry()
 
 AuthenticatedOperator = Annotated[
@@ -60,7 +74,11 @@ AuthenticatedOperator = Annotated[
     Depends(require_authenticated_human),
 ]
 
-guest_operations_mcp = build_guest_operations_mcp_server(credit_tool, trusted_tasks)
+guest_operations_mcp = build_guest_operations_mcp_server(
+    credit_tool,
+    trusted_tasks,
+    reservation_tool,
+)
 mcp_http_app = guest_operations_mcp.streamable_http_app(
     json_response=True,
     streamable_http_path="/",
@@ -79,7 +97,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Asante Secure Multi-Agent Application",
-    version="0.6.0",
+    version="0.7.0",
     lifespan=lifespan,
 )
 app.mount("/mcp", mcp_http_app)
@@ -91,7 +109,7 @@ async def root() -> dict[str, object]:
     """Return service metadata and discovery links for local development."""
     return {
         "name": "Asante Secure Multi-Agent Application",
-        "phase": 6,
+        "phase": 7,
         "status": "running",
         "docs": "/docs",
         "health": "/health",
@@ -100,7 +118,8 @@ async def root() -> dict[str, object]:
         "auth": "Bearer JWT access token",
         "workload_identity": "SPIFFE IDs",
         "observability": "OpenTelemetry",
-        "release_gate": "deterministic security + reliability evals",
+        "release_gate": "deterministic security + reliability + cache-disclosure evals",
+        "caching": "authorization-aware reservation reads",
         "otel_exporter": telemetry.exporter,
     }
 
@@ -149,9 +168,11 @@ async def run_agent(
             expires_at=datetime.now(UTC) + timedelta(minutes=30),
         )
         delegation_chain = issue_guest_support_delegation(security, task)
+        reservation_delegation_chain = issue_guest_support_reservation_delegation(security, task)
         context = AsanteRunContext(
             task=task,
             guest_support_delegation=delegation_chain,
+            guest_support_reservation_delegation=reservation_delegation_chain,
         )
         trusted_tasks.register(context)
 
@@ -215,6 +236,40 @@ async def dev_issue_credit(
             reservation_id=request.reservation_id,
             amount=request.amount,
             reason=request.reason,
+            task=task,
+            delegation_chain=delegation_chain,
+        )
+        return {
+            "task_id": task.task_id,
+            "trace_id": current_trace_id(),
+            "initiated_by": operator.principal_id,
+            **result,
+        }
+
+
+@app.get("/demo/reservations/{reservation_id}")
+def dev_get_reservation(
+    reservation_id: str,
+    operator: AuthenticatedOperator,
+) -> dict[str, object]:
+    """Exercise the secured reservation-read/cache path without the LLM or MCP."""
+    with tracer.start_as_current_span(
+        "asante.reservation.direct",
+        attributes={
+            "asante.workflow": "direct_reservation_read_test",
+            "asante.identity.kind": "authenticated_human",
+            "asante.delegation.depth": 2,
+        },
+    ):
+        task = TaskContext(
+            task_id=uuid4().hex,
+            initiated_by=operator.principal_id,
+            purpose="direct reservation read test",
+            expires_at=datetime.now(UTC) + timedelta(minutes=30),
+        )
+        delegation_chain = issue_guest_support_reservation_delegation(security, task)
+        result = reservation_tool.get_reservation(
+            reservation_id=reservation_id,
             task=task,
             delegation_chain=delegation_chain,
         )

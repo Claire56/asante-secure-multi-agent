@@ -15,7 +15,7 @@ from uuid import uuid4
 
 from agents import Runner
 from agents.tracing import add_trace_processor
-from fastapi import Depends, FastAPI
+from fastapi import Body, Depends, FastAPI, Path
 from opentelemetry.trace import Status, StatusCode
 from ruhusa import TaskContext
 
@@ -28,6 +28,15 @@ from asante_secure_multi_agent.mcp import (
     TrustedTaskRegistry,
     build_guest_operations_mcp_client,
     build_guest_operations_mcp_server,
+)
+from asante_secure_multi_agent.openapi_examples import (
+    AGENT_RUN_REQUEST_EXAMPLES,
+    AGENT_RUN_RESPONSES,
+    DEMO_CREDIT_REQUEST_EXAMPLES,
+    DEMO_CREDIT_RESPONSES,
+    DEMO_RESERVATION_RESPONSES,
+    RESERVATION_ID_EXAMPLES,
+    UNAUTHORIZED_RESPONSE,
 )
 from asante_secure_multi_agent.reliability import credit_retry_policy_from_env
 from asante_secure_multi_agent.security import (
@@ -130,7 +139,7 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.get("/auth/whoami")
+@app.get("/auth/whoami", responses=UNAUTHORIZED_RESPONSE)
 def whoami(
     operator: AuthenticatedOperator,
 ) -> dict[str, object]:
@@ -146,9 +155,13 @@ def whoami(
     }
 
 
-@app.post("/agent/run")
+@app.post(
+    "/agent/run",
+    summary="Send a message to the agent graph",
+    responses=AGENT_RUN_RESPONSES,
+)
 async def run_agent(
-    request: RunRequest,
+    request: Annotated[RunRequest, Body(openapi_examples=AGENT_RUN_REQUEST_EXAMPLES)],
     operator: AuthenticatedOperator,
 ) -> dict[str, object]:
     """Run authenticated human -> agents -> MCP -> Ruhusa with one OTel trace."""
@@ -202,7 +215,7 @@ async def run_agent(
         }
 
 
-@app.get("/demo/credits")
+@app.get("/demo/credits", summary="List issued demo credits", responses=UNAUTHORIZED_RESPONSE)
 def list_demo_credits(
     _operator: AuthenticatedOperator,
 ) -> list[dict[str, object]]:
@@ -210,9 +223,13 @@ def list_demo_credits(
     return ledger.credits
 
 
-@app.post("/demo/credits")
+@app.post(
+    "/demo/credits",
+    summary="Issue a credit directly through Ruhusa (no LLM)",
+    responses=DEMO_CREDIT_RESPONSES,
+)
 async def dev_issue_credit(
-    request: DemoCreditRequest,
+    request: Annotated[DemoCreditRequest, Body(openapi_examples=DEMO_CREDIT_REQUEST_EXAMPLES)],
     operator: AuthenticatedOperator,
 ) -> dict[str, object]:
     """Exercise authenticated-human -> Ruhusa directly with OTel visibility."""
@@ -247,9 +264,16 @@ async def dev_issue_credit(
         }
 
 
-@app.get("/demo/reservations/{reservation_id}")
+@app.get(
+    "/demo/reservations/{reservation_id}",
+    summary="Read a reservation through Ruhusa and the cache (no LLM)",
+    responses=DEMO_RESERVATION_RESPONSES,
+)
 def dev_get_reservation(
-    reservation_id: str,
+    reservation_id: Annotated[
+        str,
+        Path(description="Seeded reservation ID", openapi_examples=RESERVATION_ID_EXAMPLES),
+    ],
     operator: AuthenticatedOperator,
 ) -> dict[str, object]:
     """Exercise the secured reservation-read/cache path without the LLM or MCP."""

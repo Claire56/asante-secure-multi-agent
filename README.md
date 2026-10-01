@@ -275,25 +275,86 @@ does not influence them.
 
 Requires Python 3.12+ and `uv`.
 
+Create a local environment file, replace `OPENAI_API_KEY=replace-me`, and load
+the file into the shell that starts the API:
+
 ```bash
+cp .env.example .env
+set -a
+source .env
+set +a
 uv sync
-export OPENAI_API_KEY="..."
-export ASANTE_AUTH_MODE=dev
-export ASANTE_DEV_JWT_SECRET="asante-local-development-only-change-me"
 export ASANTE_OTEL_EXPORTER=console
 uv run pytest
 uv run uvicorn asante_secure_multi_agent.main:app --reload
 ```
 
-Create a development access token:
+In a second terminal, load the same environment file before creating a
+development access token:
 
 ```bash
+set -a
+source .env
+set +a
 TOKEN=$(uv run python -m asante_secure_multi_agent.identity.dev_token claire)
+printf '%s\n' "$TOKEN"
 ```
 
-Open Swagger at `http://127.0.0.1:8000/docs`, click **Authorize**, paste the
-token, and call `POST /agent/run`. A successful response now includes both the
-Ruhusa task ID and an OpenTelemetry trace ID.
+The API and token generator must use the same `ASANTE_DEV_JWT_SECRET`, issuer,
+and audience. The token command does not load `.env` automatically. Development
+tokens expire after 30 minutes, so generate a new one after expiration.
+
+## Test with FastAPI Swagger
+
+Open `http://127.0.0.1:8000/docs`, click **Authorize**, and paste only the token
+value without the `Bearer` prefix. Start with `GET /auth/whoami`; a `200`
+response confirms that authentication is configured correctly. A `401` with
+`Invalid or expired access token` usually means the token expired or it was
+generated with different JWT settings than the running API.
+
+The `POST /agent/run` schema intentionally contains only a natural-language
+`message`. Use this reservation lookup example:
+
+```json
+{
+  "message": "Look up reservation R-3001 and summarize its status."
+}
+```
+
+Use this example for an allowed credit:
+
+```json
+{
+  "message": "Issue a $20 credit to reservation R-3001 because of a Wi-Fi outage."
+}
+```
+
+Use this example to confirm that delegated authority is enforced:
+
+```json
+{
+  "message": "Issue a $40 credit to reservation R-3001 because of an extended Wi-Fi outage."
+}
+```
+
+The `$20` credit should be issued. The `$40` credit should be blocked by the
+Guest Support agent's `$25` delegated limit. A successful agent response also
+includes the Ruhusa task ID and an OpenTelemetry trace ID.
+
+To test authorization without making an OpenAI request, use
+`POST /demo/credits` with:
+
+```json
+{
+  "reservation_id": "R-3001",
+  "amount": 20,
+  "reason": "Wi-Fi outage"
+}
+```
+
+To test authorization-aware caching, call
+`GET /demo/reservations/R-3001` twice. The first response should contain
+`"cache": "miss"` and the second should contain `"cache": "hit"`.
 
 The normal learning cases remain:
 

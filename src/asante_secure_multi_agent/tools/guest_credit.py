@@ -137,6 +137,7 @@ class SecuredGuestCreditTool:
                         admission.authorization.policy_id,
                     )
             record_authorization(
+                action="guest.credit.issue",
                 effect=admission_effect,
                 phase="admission",
                 duration_seconds=monotonic_time() - started,
@@ -179,6 +180,7 @@ class SecuredGuestCreditTool:
                         live.authorization.policy_id,
                     )
             record_authorization(
+                action="guest.credit.issue",
                 effect=live_effect,
                 phase="revalidation",
                 duration_seconds=monotonic_time() - started,

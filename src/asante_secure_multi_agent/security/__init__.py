@@ -4,6 +4,7 @@ from .delegation import (
     DEFAULT_GUEST_SUPPORT_CREDIT_LIMIT,
     DEFAULT_SUPERVISOR_CREDIT_LIMIT,
     issue_guest_support_delegation,
+    issue_guest_support_reservation_delegation,
 )
 from .runtime import AsanteSecurityRuntime, build_security_runtime
 
@@ -13,4 +14,5 @@ __all__ = [
     "AsanteSecurityRuntime",
     "build_security_runtime",
     "issue_guest_support_delegation",
+    "issue_guest_support_reservation_delegation",
 ]

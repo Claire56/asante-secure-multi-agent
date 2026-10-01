@@ -1,5 +1,16 @@
-"""Secured application tools and their backing fake-external systems."""
+"""Secured Asante business-tool implementations."""
 
 from .guest_credit import GuestCreditLedger, SecuredGuestCreditTool
+from .reservation import (
+    InMemoryReservationProvider,
+    ReservationProvider,
+    SecuredReservationTool,
+)
 
-__all__ = ["GuestCreditLedger", "SecuredGuestCreditTool"]
+__all__ = [
+    "GuestCreditLedger",
+    "InMemoryReservationProvider",
+    "ReservationProvider",
+    "SecuredGuestCreditTool",
+    "SecuredReservationTool",
+]

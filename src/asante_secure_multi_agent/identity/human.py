@@ -217,7 +217,14 @@ def get_access_token_verifier() -> AccessTokenVerifier:
 
 
 _tracer = get_tracer()
-_bearer = HTTPBearer(auto_error=False)
+_bearer = HTTPBearer(
+    auto_error=False,
+    description=(
+        "OAuth access token (JWT, typ=at+jwt). For local dev, mint one with "
+        "`uv run python -m asante_secure_multi_agent.identity.dev_token claire` "
+        "and paste it here without the 'Bearer ' prefix."
+    ),
+)
 
 BearerCredentials = Annotated[
     HTTPAuthorizationCredentials | None,

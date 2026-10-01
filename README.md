@@ -12,7 +12,83 @@ The project is deliberately split into layers:
 - **Authorization boundary:** Ruhusa 0.8.0 for delegated authority, policy, trusted invocation provenance, tool identity, revocation semantics, and execution fencing.
 - **Observability:** OpenTelemetry traces and security/execution metrics, plus an OpenAI Agents tracing bridge.
 - **Reliability:** bounded known-safe retries, server-derived idempotency, and fail-closed unknown outcomes.
-- **Release gate:** deterministic authorization, attack, reliability, and agent-contract evals in GitHub Actions.
+- **Authorization-aware caching:** reservation reads are cached only after live Ruhusa authorization and execution-time revalidation.
+- **Release gate:** deterministic authorization, attack, reliability, cache-disclosure, and agent-contract evals in GitHub Actions.
+
+## Phase 7 vertical slice: authorization-aware caching
+
+Phase 7 adds a protected read capability, `get_reservation`, and an in-memory TTL
+cache that is deliberately placed **after** Ruhusa authorization and execution-time
+revalidation.
+
+```text
+Guest Support
+  -> MCP get_reservation
+  -> trusted task lookup
+  -> Ruhusa authorization
+  -> Ruhusa revalidation
+  -> authorization-aware cache
+       -> HIT: return cached reservation
+       -> MISS: reservation provider -> cache -> return
+```
+
+The central invariant is:
+
+> A cache hit may save an external read, but it may never save the authorization check.
+
+The cache stores reservation data, not Ruhusa `ALLOW` decisions. A revoked grant is
+therefore denied before `cache.get()` is reached, even if the requested reservation
+is still physically present in cache.
+
+### Capability-specific delegation
+
+Credit and reservation-read authority use separate delegation chains. The credit
+chain keeps its `$100 -> $25` numeric attenuation, while the reservation-read chain
+contains only `reservation.read`. This avoids applying credit-specific argument
+constraints to unrelated read actions.
+
+### Cache-key design
+
+The Phase 7 key is derived from stable resource semantics and a schema version:
+
+```text
+reservation-read-v1
+reservation.read
+reservation:<id>
+```
+
+The resulting key is hashed, so raw reservation IDs do not appear in the key. Task
+IDs and grant IDs are intentionally excluded because authorization is checked on
+every read; including ephemeral IDs would prevent useful cross-request cache hits.
+If the representation later becomes tenant-, role-, or user-specific, that security
+context must become part of the cache partition/key.
+
+### Cache security evals
+
+The deterministic gate now includes cache cases for:
+
+1. first authorized read -> cache miss;
+2. repeated authorized read -> cache hit;
+3. different resource -> cache miss;
+4. revoked grant after cache population -> deny with no disclosure;
+5. cross-task replay -> deny with no disclosure;
+6. cache schema-version change -> stale key not reused; and
+7. MCP reservation schema -> no task/grant/principal/cache authority exposed to the model.
+
+The release thresholds now include **zero unauthorized disclosures** in addition to
+zero unauthorized side effects.
+
+### Local cache test
+
+After authorizing in Swagger, call:
+
+```text
+GET /demo/reservations/R-3001
+```
+
+The first response should report `"cache": "miss"`; the next authorized call should
+report `"cache": "hit"` while still creating a fresh Ruhusa task/delegation and
+revalidating authority.
 
 ## Phase 6 vertical slice: reliability + eval-gated CI
 
@@ -199,25 +275,86 @@ does not influence them.
 
 Requires Python 3.12+ and `uv`.
 
+Create a local environment file, replace `OPENAI_API_KEY=replace-me`, and load
+the file into the shell that starts the API:
+
 ```bash
+cp .env.example .env
+set -a
+source .env
+set +a
 uv sync
-export OPENAI_API_KEY="..."
-export ASANTE_AUTH_MODE=dev
-export ASANTE_DEV_JWT_SECRET="asante-local-development-only-change-me"
 export ASANTE_OTEL_EXPORTER=console
 uv run pytest
 uv run uvicorn asante_secure_multi_agent.main:app --reload
 ```
 
-Create a development access token:
+In a second terminal, load the same environment file before creating a
+development access token:
 
 ```bash
+set -a
+source .env
+set +a
 TOKEN=$(uv run python -m asante_secure_multi_agent.identity.dev_token claire)
+printf '%s\n' "$TOKEN"
 ```
 
-Open Swagger at `http://127.0.0.1:8000/docs`, click **Authorize**, paste the
-token, and call `POST /agent/run`. A successful response now includes both the
-Ruhusa task ID and an OpenTelemetry trace ID.
+The API and token generator must use the same `ASANTE_DEV_JWT_SECRET`, issuer,
+and audience. The token command does not load `.env` automatically. Development
+tokens expire after 30 minutes, so generate a new one after expiration.
+
+## Test with FastAPI Swagger
+
+Open `http://127.0.0.1:8000/docs`, click **Authorize**, and paste only the token
+value without the `Bearer` prefix. Start with `GET /auth/whoami`; a `200`
+response confirms that authentication is configured correctly. A `401` with
+`Invalid or expired access token` usually means the token expired or it was
+generated with different JWT settings than the running API.
+
+The `POST /agent/run` schema intentionally contains only a natural-language
+`message`. Use this reservation lookup example:
+
+```json
+{
+  "message": "Look up reservation R-3001 and summarize its status."
+}
+```
+
+Use this example for an allowed credit:
+
+```json
+{
+  "message": "Issue a $20 credit to reservation R-3001 because of a Wi-Fi outage."
+}
+```
+
+Use this example to confirm that delegated authority is enforced:
+
+```json
+{
+  "message": "Issue a $40 credit to reservation R-3001 because of an extended Wi-Fi outage."
+}
+```
+
+The `$20` credit should be issued. The `$40` credit should be blocked by the
+Guest Support agent's `$25` delegated limit. A successful agent response also
+includes the Ruhusa task ID and an OpenTelemetry trace ID.
+
+To test authorization without making an OpenAI request, use
+`POST /demo/credits` with:
+
+```json
+{
+  "reservation_id": "R-3001",
+  "amount": 20,
+  "reason": "Wi-Fi outage"
+}
+```
+
+To test authorization-aware caching, call
+`GET /demo/reservations/R-3001` twice. The first response should contain
+`"cache": "miss"` and the second should contain `"cache": "hit"`.
 
 The normal learning cases remain:
 
@@ -243,6 +380,8 @@ adds tests for:
 4. ~~Add authenticated human identity and trusted workload identity.~~
 5. ~~Add OpenTelemetry traces and security metrics.~~
 6. ~~Add agent evals and authorization attack tests to CI.~~
-7. Add durable human approval workflow.
-8. Replace in-memory stores with production backends/shared task state.
-9. Split MCP/agent workloads and replace static SPIFFE assignment with SPIRE/SVID verification.
+7. ~~Add authorization-aware caching with revocation-safe reads.~~
+8. Add durable human approval workflow.
+9. Replace in-memory stores with production backends/shared task state.
+10. Replace the in-memory cache with Redis while preserving the same authorization-before-cache invariant.
+11. Split MCP/agent workloads and replace static SPIFFE assignment with SPIRE/SVID verification.

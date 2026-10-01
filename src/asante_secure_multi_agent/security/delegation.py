@@ -1,8 +1,9 @@
-"""Trusted task-bound delegation for the Asante guest-credit workflow.
+"""Trusted task-bound delegation for Asante guest operations.
 
 Agent SDK handoffs decide *who should work next*. Ruhusa delegation grants decide
-*what authority that next agent actually receives*. Phase 6 preserves the
-trusted human/workload identity chain and adds observability around grant issue.
+*what authority that next agent actually receives*. Phase 7 keeps credit and
+reservation-read authority in separate chains so action-specific constraints do
+not bleed across capabilities.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from asante_secure_multi_agent.telemetry import get_tracer
 from .runtime import AsanteSecurityRuntime
 
 GUEST_CREDIT_ACTION = "guest.credit.issue"
+RESERVATION_READ_ACTION = "reservation.read"
 RESERVATION_RESOURCE_PREFIX = "reservation:"
 DEFAULT_SUPERVISOR_CREDIT_LIMIT = 100.0
 DEFAULT_GUEST_SUPPORT_CREDIT_LIMIT = 25.0
@@ -26,7 +28,7 @@ _tracer = get_tracer()
 
 
 def _credit_scope(limit: float) -> Scope:
-    """Create the Ruhusa scope used for bounded guest-credit delegation."""
+    """Create bounded guest-credit delegation scope."""
     if limit <= 0:
         raise ValueError("delegation limit must be greater than zero")
     return Scope(
@@ -36,6 +38,49 @@ def _credit_scope(limit: float) -> Scope:
     )
 
 
+def _reservation_read_scope() -> Scope:
+    """Create reservation-read scope without credit-specific argument limits."""
+    return Scope(
+        actions=frozenset({RESERVATION_READ_ACTION}),
+        resource_prefixes=(RESERVATION_RESOURCE_PREFIX,),
+    )
+
+
+def _issue_chain(
+    security: AsanteSecurityRuntime,
+    task: TaskContext,
+    *,
+    root_scope: Scope,
+    child_scope: Scope,
+) -> tuple[DelegationGrant, DelegationGrant]:
+    supervisor_id = security.workload_identities.require(SUPERVISOR_WORKLOAD).principal_id
+    guest_support_id = security.workload_identities.require(GUEST_SUPPORT_WORKLOAD).principal_id
+    now = datetime.now(UTC)
+    expires_at = min(task.expires_at, now + timedelta(minutes=30))
+
+    root_grant = DelegationGrant(
+        grant_id=f"grant:{uuid4().hex}",
+        grantor_id=task.initiated_by,
+        grantee_id=supervisor_id,
+        task_id=task.task_id,
+        scope=root_scope,
+        issued_at=now,
+        expires_at=expires_at,
+    )
+    guest_support_grant = DelegationGrant(
+        grant_id=f"grant:{uuid4().hex}",
+        grantor_id=supervisor_id,
+        grantee_id=guest_support_id,
+        task_id=task.task_id,
+        scope=child_scope,
+        issued_at=now,
+        expires_at=expires_at,
+    )
+    security.grant_store.register(root_grant)
+    security.grant_store.register(guest_support_grant)
+    return root_grant, guest_support_grant
+
+
 def issue_guest_support_delegation(
     security: AsanteSecurityRuntime,
     task: TaskContext,
@@ -43,7 +88,7 @@ def issue_guest_support_delegation(
     supervisor_limit: float = DEFAULT_SUPERVISOR_CREDIT_LIMIT,
     guest_support_limit: float = DEFAULT_GUEST_SUPPORT_CREDIT_LIMIT,
 ) -> tuple[DelegationGrant, DelegationGrant]:
-    """Issue authenticated-human -> supervisor -> guest-support authority."""
+    """Issue authenticated-human -> supervisor -> guest-support credit authority."""
     if guest_support_limit > supervisor_limit:
         raise ValueError("guest-support delegation cannot exceed supervisor authority")
 
@@ -56,31 +101,30 @@ def issue_guest_support_delegation(
             "asante.delegation.guest_support_limit": float(guest_support_limit),
         },
     ):
-        supervisor_id = security.workload_identities.require(SUPERVISOR_WORKLOAD).principal_id
-        guest_support_id = security.workload_identities.require(GUEST_SUPPORT_WORKLOAD).principal_id
-
-        now = datetime.now(UTC)
-        expires_at = min(task.expires_at, now + timedelta(minutes=30))
-
-        root_grant = DelegationGrant(
-            grant_id=f"grant:{uuid4().hex}",
-            grantor_id=task.initiated_by,
-            grantee_id=supervisor_id,
-            task_id=task.task_id,
-            scope=_credit_scope(supervisor_limit),
-            issued_at=now,
-            expires_at=expires_at,
-        )
-        guest_support_grant = DelegationGrant(
-            grant_id=f"grant:{uuid4().hex}",
-            grantor_id=supervisor_id,
-            grantee_id=guest_support_id,
-            task_id=task.task_id,
-            scope=_credit_scope(guest_support_limit),
-            issued_at=now,
-            expires_at=expires_at,
+        return _issue_chain(
+            security,
+            task,
+            root_scope=_credit_scope(supervisor_limit),
+            child_scope=_credit_scope(guest_support_limit),
         )
 
-        security.grant_store.register(root_grant)
-        security.grant_store.register(guest_support_grant)
-        return root_grant, guest_support_grant
+
+def issue_guest_support_reservation_delegation(
+    security: AsanteSecurityRuntime,
+    task: TaskContext,
+) -> tuple[DelegationGrant, DelegationGrant]:
+    """Issue a separate task-bound chain for reservation-read authority."""
+    with _tracer.start_as_current_span(
+        "asante.delegation.issue",
+        attributes={
+            "asante.delegation.depth": 2,
+            "asante.delegation.action": RESERVATION_READ_ACTION,
+        },
+    ):
+        scope = _reservation_read_scope()
+        return _issue_chain(
+            security,
+            task,
+            root_scope=scope,
+            child_scope=scope,
+        )

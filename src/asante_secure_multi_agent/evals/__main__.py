@@ -1,4 +1,4 @@
-"""CLI entrypoint for the Phase 6 release gate."""
+"""CLI entrypoint for the Phase 7 release gate."""
 
 from __future__ import annotations
 

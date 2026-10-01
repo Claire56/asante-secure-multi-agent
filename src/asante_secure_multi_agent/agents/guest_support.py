@@ -6,8 +6,10 @@ from agents import Agent
 from agents.mcp import MCPServerStreamableHttp
 
 GUEST_SUPPORT_INSTRUCTIONS = (
-    "You handle Asante guest-support requests. Use the MCP tools for real actions. "
-    "Never claim a credit was issued unless the MCP tool returns status='issued'. "
+    "You handle Asante guest-support requests. Use the MCP tools for real actions and "
+    "reservation lookups. Treat get_reservation results as protected data even when they "
+    "come from cache. Never claim a credit was issued unless the MCP tool returns "
+    "status='issued'. "
     "A handoff does not give you unlimited authority: Ruhusa validates the canonical "
     "delegation chain behind the MCP server. If an action is blocked or requires "
     "approval, explain that outcome and do not alter the amount or retry to bypass it."

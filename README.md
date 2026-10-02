@@ -11,16 +11,16 @@ authority, or execution trust.
 ## What this project demonstrates
 
 - **Human authentication:** OAuth-style Bearer JWT access tokens.
-- **Workload identity:** trusted SPIFFE IDs for Supervisor and Guest Support.
+- **Workload identity:** distinct trusted SPIFFE IDs for Supervisor, four specialists, and approval execution.
 - **Delegated authorization:** task-bound, scope-attenuated authority through Ruhusa 0.8.0.
-- **Agent orchestration:** OpenAI Agents SDK Supervisor -> Guest Support handoff.
+- **Agent orchestration:** OpenAI Agents SDK manager-style Supervisor invoking four bounded specialist agents.
 - **Agent tool protocol:** MCP over Streamable HTTP with authority hidden from model-visible schemas.
 - **Execution security:** trusted invocation provenance, execution fencing, revocation, and revalidation.
 - **Observability:** OpenTelemetry traces/metrics plus an OpenAI Agents tracing bridge.
 - **Reliability:** bounded known-safe retries, server-derived idempotency, and fail-closed unknown outcomes.
 - **Authorization-aware caching:** cached reservation reads never bypass live authorization.
 - **Release safety:** deterministic authorization, attack, reliability, disclosure, and agent-contract evals.
-- **Property operations:** maintenance work orders, guest messaging, and durable human approval for larger service-recovery credits.
+- **Least-privilege property operations:** Reservations, Property Operations, Guest Support, and Service Recovery each have separate identity, tools, delegation, and Ruhusa policy.
 
 ## Architecture
 
@@ -31,49 +31,55 @@ authority, or execution trust.
                                 |
                                 v
                       Operations Supervisor
+                      (manager / final answer)
                                 |
-                       delegated authority
+          +---------------------+----------------------+
+          |                     |                      |
+          v                     v                      v
+   Reservations Agent   Property Operations      Guest Support
+   reservation.read       maintenance.create     guest.message.send
+          |                     |                      |
+          +---------------------+----------------------+
+                                |
                                 v
-                       Guest Support Agent
+                       Service Recovery Agent
+                guest.credit.issue / guest.credit.request
                                 |
                                 v
-                       MCP Tool Boundary
-                         /             \
-                        /               \
-             get_reservation       issue_guest_credit
-                    |                     |
-                    v                     v
-                 Ruhusa                Ruhusa
-              authorization         authorization
-                    |                     |
-              revalidation            revalidation
-                    |                     |
-                    v                     v
-          Authorization-Aware       Idempotency +
-                 Cache              Bounded Retry
-                    |                     |
-                    v                     v
-            Reservation Provider    Credit Provider
-                         \             /
-                          \           /
-                           OpenTelemetry
+                       Filtered MCP clients
                                 |
-                       deterministic evals
-                                |
-                           CI release gate
+                                v
+                              Ruhusa
+             identity + delegation + policy + revalidation
+                        /                    \
+                       /                      \
+          Authorization-Aware             Idempotent
+          Reservation Cache               Credit Path
+                  |                            |
+                  v                            v
+         Reservation Provider             Credit Provider
+                  \                            /
+                   \                          /
+                         OpenTelemetry
+                              |
+                    deterministic evals
+                              |
+                        CI release gate
 ```
 
 ## Security invariants
 
 The project treats these as release properties rather than informal expectations:
 
-1. **Agent handoff is not authority delegation.** A specialist receives only authority explicitly delegated through the trusted chain.
-2. **Model-visible MCP arguments cannot assert identity or grants.** Task, principal, grant, and cache authority stay server-side.
-3. **Ruhusa is checked immediately before protected execution or disclosure.** A stale plan cannot bypass revocation.
-4. **Denied or approval-required credit actions produce zero side effects.**
-5. **Unknown execution outcomes are never blindly retried.**
-6. **A cache hit may save an external read, but it may never save the authorization check.**
-7. **Unauthorized cached-data disclosure is a release-blocking failure.**
+1. **Agent orchestration is not authority delegation.** The Supervisor may invoke a specialist, but only Ruhusa grants determine what that specialist may do.
+2. **Specialists are least-privilege workloads.** Reservations, Property Operations, Guest Support, and Service Recovery have distinct SPIFFE IDs and distinct business capabilities.
+3. **MCP tool visibility is capability-scoped.** Each specialist client sees only its allow-listed tools, and the server checks the trusted workload label before dispatch.
+4. **Model-visible MCP arguments cannot assert identity or grants.** Task, principal, grant, workload, and cache authority stay server-side.
+5. **Ruhusa is checked immediately before protected execution or disclosure.** A stale plan cannot bypass revocation.
+6. **Denied or approval-required credit actions produce zero side effects.**
+7. **Unknown execution outcomes are never blindly retried.**
+8. **A cache hit may save an external read, but it may never save the authorization check.**
+9. **Unauthorized cached-data disclosure or cross-specialist privilege expansion is a release-blocking failure.**
 
 ## API documentation
 
@@ -92,7 +98,7 @@ The operator-facing API is intentionally small:
 | `GET /` | No | Service discovery and architecture metadata |
 | `GET /health` | No | Liveness probe |
 | `GET /auth/whoami` | Bearer | Show the canonical authenticated human principal |
-| `POST /agent/run` | Bearer | Run Supervisor -> Guest Support -> MCP -> Ruhusa |
+| `POST /agent/run` | Bearer | Run Supervisor -> least-privilege specialists -> MCP -> Ruhusa |
 | `GET /demo/credits` | Bearer | Inspect credits that actually reached the demo side effect |
 | `POST /demo/credits` | Bearer | Exercise the secured credit path without the LLM/MCP layer |
 | `GET /demo/reservations/{reservation_id}` | Bearer | Exercise Ruhusa + authorization-aware cache directly |
@@ -133,12 +139,60 @@ uv run python -m asante_secure_multi_agent.evals --output eval-report.json
 The sections below preserve the implementation history and the security property introduced
 at each phase. The architecture above describes the system as it exists today.
 
+## Phase 9: least-privilege specialist agents
+
+Phase 9 splits the broad Guest Support role into four stable business/security boundaries while
+keeping the Operations Supervisor responsible for the final operator-facing response. The
+Supervisor invokes specialists as agent tools, allowing one request to coordinate several
+specialists without transferring the whole conversation or sharing a broad MCP tool surface.
+
+```text
+Operations Supervisor
+  -> Reservations: reservation.read
+  -> Property Operations: maintenance.create
+  -> Guest Support: guest.message.send
+  -> Service Recovery: guest.credit.issue / guest.credit.request
+```
+
+Each specialist has:
+
+- a distinct SPIFFE workload identity;
+- a capability-specific task-bound Ruhusa delegation chain;
+- a statically filtered MCP client tool list;
+- a trusted MCP workload label checked server-side; and
+- a Ruhusa policy that independently authorizes only that specialist's action.
+
+This means prompts cannot turn role text into authority. For example, Guest Support cannot create
+maintenance work orders, Property Operations cannot message guests, Reservations cannot issue
+credits, and Service Recovery cannot read reservation records. The durable Approval Executor
+remains deterministic infrastructure rather than an LLM specialist.
+
+### Which layer enforces what
+
+The MCP server binds each tool to its owning specialist's principal and delegation chain, so
+Ruhusa sees the *tool's* specialist rather than the *caller*. At runtime, a cross-specialist
+call is therefore stopped by two layers before Ruhusa is reached:
+
+1. **Client tool filter**: each specialist's model is never shown another specialist's tools.
+2. **Server workload check**: the MCP server rejects a call whose trusted `asante/workload`
+   label does not own the tool, with zero side effects.
+
+The workload label is set by trusted in-process client code, never by the model, but it is
+not cryptographically authenticated. Ruhusa's per-specialist policies and delegation chains are
+the backstop that keeps each tool within its specialist's scope (amount limits, actions,
+resources) and would deny a tool executed under the wrong chain. Making Ruhusa authorize the
+*caller* directly requires authenticated workload identity, which is the SPIRE/SVID roadmap item.
+
+`tests/test_specialist_runtime_boundary.py` exercises layers 1 and 2 over real MCP calls;
+`tests/test_specialist_agents.py` and the `cross_agent_privilege_escalation_blocked` eval
+exercise the Ruhusa backstop.
+
 ## Phase 8 product slice: property operations + human approval
 
 Phase 8 moves the project from a secure-agent reference flow toward the real
-Asante Stays operating backend. Guest Support can now verify a reservation, create
-a maintenance work order, send an operational guest update, issue a small service
-credit, or request durable human approval for a larger credit.
+Asante Stays operating backend. At this phase, Guest Support held the broad product tool
+surface for reservation lookup, maintenance, messaging, and service recovery. Phase 9
+subsequently splits those capabilities across least-privilege specialists.
 
 ```text
 Guest / operator issue
@@ -211,7 +265,7 @@ cache that is deliberately placed **after** Ruhusa authorization and execution-t
 revalidation.
 
 ```text
-Guest Support
+Reservations
   -> MCP get_reservation
   -> trusted task lookup
   -> Ruhusa authorization
@@ -342,7 +396,7 @@ The Phase 6 gate includes cases for:
 8. duplicate logical execution/idempotency;
 9. known-safe transient retry;
 10. unknown-outcome no-retry behavior; and
-11. Supervisor/Guest Support safety-instruction contracts.
+11. Supervisor/specialist safety-instruction contracts.
 
 A future live-model eval suite can measure model behavior separately. The CI
 release gate remains deterministic so a security invariant never becomes a
@@ -355,7 +409,7 @@ Phase 5 adds OpenTelemetry without changing who is trusted or what Ruhusa allows
 ```text
 HTTP /agent/run
   -> Bearer token verification
-  -> human -> Supervisor -> Guest Support delegation
+  -> human -> Supervisor -> specialist delegation
   -> OpenAI Agents workflow / handoff / generation structure
   -> Streamable HTTP MCP
   -> trusted task lookup
@@ -373,7 +427,7 @@ Phase 5 records structural and security metadata such as:
 
 - authenticated vs rejected identity attempts;
 - delegation depth and bounded credit limits;
-- Supervisor / Guest Support agent runtime structure;
+- Supervisor / specialist agent runtime structure;
 - MCP tool name and outcome;
 - Ruhusa admission and revalidation effects;
 - policy ID when one matched;
@@ -535,13 +589,13 @@ Use this example to confirm that delegated authority is enforced:
 }
 ```
 
-The `$20` credit should be issued. The `$40` credit is above the Guest Support
+The `$20` credit should be issued. The `$40` credit is above the Service Recovery
 agent's `$25` direct limit, so the agent should request human approval instead:
 `GET /operations/approvals` shows a `pending` request and no credit is issued.
 A successful agent response also includes the Ruhusa task ID and an
 OpenTelemetry trace ID.
 
-To test the full Phase 8 workflow, send:
+To test the full Phase 9 workflow, send:
 
 ```json
 {
@@ -599,6 +653,11 @@ adds tests for:
 6. ~~Add agent evals and authorization attack tests to CI.~~
 7. ~~Add authorization-aware caching with revocation-safe reads.~~
 8. ~~Add durable human approval workflow plus maintenance and guest messaging.~~
-9. Replace in-memory stores with production backends/shared task state.
-10. Replace the in-memory cache with Redis while preserving the same authorization-before-cache invariant.
-11. Split MCP/agent workloads and replace static SPIFFE assignment with SPIRE/SVID verification.
+9. ~~Add least-privilege specialist agents for Reservations, Property Operations, Guest Support, and Service Recovery.~~
+10. Add cleaning / turnover workflows.
+11. Add secure access / door-code operations.
+12. Replace in-memory stores with production backends/shared task state.
+13. Replace the in-memory cache with Redis while preserving the same authorization-before-cache invariant.
+14. Add real PMS / booking-channel integration.
+15. Split MCP/agent workloads into deployable services.
+16. Replace static SPIFFE assignment with SPIRE/SVID verification.

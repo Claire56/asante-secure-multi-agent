@@ -11,7 +11,7 @@ from opentelemetry.trace import Status, StatusCode
 from ruhusa import DecisionEffect, DelegationGrant, Principal, TaskContext
 
 from asante_secure_multi_agent.cache import CacheStore, build_reservation_cache_key
-from asante_secure_multi_agent.identity import GUEST_SUPPORT_WORKLOAD, SUPERVISOR_WORKLOAD
+from asante_secure_multi_agent.identity import RESERVATIONS_WORKLOAD, SUPERVISOR_WORKLOAD
 from asante_secure_multi_agent.security.runtime import (
     RESERVATION_TOOL_ID,
     RESERVATION_TOOL_IMPLEMENTATION,
@@ -112,10 +112,10 @@ class SecuredReservationTool:
             supervisor_id = self.security.workload_identities.require(
                 SUPERVISOR_WORKLOAD
             ).principal_id
-            guest_support_id = self.security.workload_identities.require(
-                GUEST_SUPPORT_WORKLOAD
+            reservations_id = self.security.workload_identities.require(
+                RESERVATIONS_WORKLOAD
             ).principal_id
-            principal = Principal(principal_id=guest_support_id, principal_type="agent")
+            principal = Principal(principal_id=reservations_id, principal_type="agent")
             now = datetime.now(UTC)
             invocation_expiry = min(task.expires_at, now + timedelta(minutes=5))
 

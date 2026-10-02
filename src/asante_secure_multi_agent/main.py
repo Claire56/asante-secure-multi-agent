@@ -1,9 +1,9 @@
 """HTTP entrypoint for the Asante secure property-operations application.
 
-Phase 8 adds the first product workflow on top of the secure agent runtime:
-maintenance triage, guest messaging, and durable human approval for larger
-service-recovery credits. Identity, delegation, MCP, Ruhusa, observability,
-reliability, and authorization-aware caching remain the underlying controls.
+Phase 9 introduces manager-style least-privilege specialist agents. The Operations
+Supervisor remains responsible for the final answer and invokes Reservations, Property
+Operations, Guest Support, and Service Recovery as bounded agent tools. Each specialist
+has its own SPIFFE identity, filtered MCP tool surface, delegated scope, and Ruhusa policy.
 """
 
 from __future__ import annotations
@@ -20,7 +20,13 @@ from fastapi import Body, Depends, FastAPI, HTTPException, Path
 from opentelemetry.trace import Status, StatusCode
 from ruhusa import TaskContext
 
-from asante_secure_multi_agent.agents import build_guest_support_agent, build_supervisor_agent
+from asante_secure_multi_agent.agents import (
+    build_guest_support_agent,
+    build_property_operations_agent,
+    build_reservations_agent,
+    build_service_recovery_agent,
+    build_supervisor_agent,
+)
 from asante_secure_multi_agent.api_models import (
     AgentRunResponse,
     ApprovalDecisionRequest,
@@ -47,8 +53,11 @@ from asante_secure_multi_agent.context import AsanteRunContext
 from asante_secure_multi_agent.identity import AuthenticatedHuman, require_authenticated_human
 from asante_secure_multi_agent.mcp import (
     TrustedTaskRegistry,
-    build_guest_operations_mcp_client,
     build_guest_operations_mcp_server,
+    build_guest_support_mcp_client,
+    build_property_operations_mcp_client,
+    build_reservations_mcp_client,
+    build_service_recovery_mcp_client,
 )
 from asante_secure_multi_agent.openapi_examples import (
     AGENT_RUN_REQUEST_EXAMPLES,
@@ -64,10 +73,11 @@ from asante_secure_multi_agent.reliability import credit_retry_policy_from_env
 from asante_secure_multi_agent.security import (
     build_security_runtime,
     issue_approval_executor_delegation,
-    issue_guest_support_credit_request_delegation,
-    issue_guest_support_delegation,
-    issue_guest_support_reservation_delegation,
-    issue_guest_support_service_delegation,
+    issue_guest_support_message_delegation,
+    issue_property_operations_delegation,
+    issue_reservations_delegation,
+    issue_service_recovery_credit_request_delegation,
+    issue_service_recovery_delegation,
 )
 from asante_secure_multi_agent.telemetry import (
     OpenAIAgentsOpenTelemetryProcessor,
@@ -88,39 +98,52 @@ from asante_secure_multi_agent.tools import (
 )
 
 APP_DESCRIPTION = """
-Asante Secure Multi-Agent is the secure property-operations backend for **Asante Stays**:
-maintenance work orders, guest messaging, and service-recovery credits with durable human
-approval, all executed by AI agents under task-bound, independently authorized authority.
+Asante Secure Multi-Agent is the secure property-operations backend for **Asante Stays**.
+It combines authenticated human operators with a manager-style Operations Supervisor and four
+least-privilege specialist agents.
 
 The API demonstrates a complete trust chain:
 
 1. **Human authentication** with OAuth-style Bearer access tokens.
-2. **Workload identity** using trusted SPIFFE IDs for Supervisor and Guest Support.
-3. **Task-bound delegated authority** enforced by Ruhusa.
-4. **MCP over Streamable HTTP** for model-visible business tools.
-5. **Execution fencing and live revalidation** before protected side effects or data disclosure.
-6. **OpenTelemetry** traces and security/reliability metrics.
-7. **Bounded retry + idempotency** for protected credit writes.
-8. **Authorization-aware caching** where every cache hit is preceded by fresh authorization.
-9. **Durable human approval** for larger credits, executed by a separate trusted workload.
-10. **Deterministic release gates** for attack, reliability, and disclosure regressions.
+2. **Distinct workload identity** using trusted SPIFFE IDs for Supervisor, Reservations,
+   Property Operations, Guest Support, Service Recovery, and the Approval Executor.
+3. **Task-bound delegated authority** enforced by Ruhusa per specialist capability.
+4. **Filtered MCP tool surfaces** so each specialist sees only its own business tools.
+5. **Server-side workload checks + Ruhusa policy** so prompt roles are never the security boundary.
+6. **Execution fencing and live revalidation** before protected side effects or disclosure.
+7. **OpenTelemetry** traces and security/reliability metrics.
+8. **Bounded retry + idempotency** for protected credit writes.
+9. **Authorization-aware caching** where every cache hit is preceded by fresh authorization.
+10. **Durable human approval** for larger credits, executed by a separate trusted workload.
+11. **Deterministic release gates** for attack, reliability, disclosure, and
+    specialist-boundary regressions.
+
+### Least-privilege specialists
+
+* **Reservations** may read protected reservation data.
+* **Property Operations** may create maintenance work orders.
+* **Guest Support** may send operational guest messages.
+* **Service Recovery** may issue small credits or request human approval.
+
+The Supervisor coordinates these specialists as bounded agent tools and owns the final response,
+but it does not inherit their business capabilities. A specialist result also does not become
+authority for another specialist.
 
 ### Approval separation of duties
 
-Guest Support may *request* a service-recovery credit above $25 (up to $100), but it cannot
-approve or execute that request. Approval decisions require an authenticated human token
-containing `asante:approve`; execution then runs through a separate trusted workload and a
-distinct Ruhusa action.
+Service Recovery may *request* a service-recovery credit above $25 (up to $100), but it cannot
+approve that request. Approval decisions require an authenticated human token containing
+`asante:approve`; execution then runs through a separate trusted workload and distinct Ruhusa
+action.
 
 ### Security semantics
 
-Ruhusa denials are represented as domain responses such as `status=blocked`; they are not
-HTTP authentication errors. HTTP `401` is reserved for missing, invalid, or expired Bearer
-credentials. Approval endpoints additionally return `403` (missing `asante:approve`),
-`404` (unknown approval), and `409` (invalid state transition).
+Ruhusa denials are represented as domain responses such as `status=blocked`; they are not HTTP
+authentication errors. HTTP `401` is reserved for missing, invalid, or expired Bearer credentials.
+Approval endpoints additionally return `403` (missing `asante:approve`), `404` (unknown approval),
+and `409` (invalid state transition).
 
-> A cache hit may save an external reservation read, but it may never save the authorization
-> check.
+> A cache hit may save an external reservation read, but it may never save the authorization check.
 """
 
 OPENAPI_TAGS = [
@@ -218,7 +241,7 @@ app = FastAPI(
     title="Asante Secure Multi-Agent Application",
     summary="Secure AI property operations for Asante Stays.",
     description=APP_DESCRIPTION,
-    version="0.8.0",
+    version="0.9.0",
     openapi_tags=OPENAPI_TAGS,
     contact={
         "name": "Jamiiz AI Systems",
@@ -241,7 +264,7 @@ async def root() -> dict[str, object]:
     """Return versioned service metadata and local API discovery links."""
     return {
         "name": "Asante Secure Multi-Agent Application",
-        "phase": 8,
+        "phase": 9,
         "status": "running",
         "docs": "/docs",
         "redoc": "/redoc",
@@ -252,6 +275,12 @@ async def root() -> dict[str, object]:
             "approvals": "/operations/approvals",
             "maintenance": "/operations/work-orders",
             "messages": "/operations/messages",
+        },
+        "specialists": {
+            "reservations": "reservation.read",
+            "property_operations": "maintenance.create",
+            "guest_support": "guest.message.send",
+            "service_recovery": "guest.credit.issue / guest.credit.request",
         },
         "auth": "Bearer JWT access token",
         "workload_identity": "SPIFFE IDs",
@@ -335,21 +364,33 @@ async def run_agent(
         )
         context = AsanteRunContext(
             task=task,
-            guest_support_delegation=issue_guest_support_delegation(security, task),
-            guest_support_reservation_delegation=(
-                issue_guest_support_reservation_delegation(security, task)
-            ),
-            guest_support_service_delegation=issue_guest_support_service_delegation(security, task),
-            guest_support_credit_request_delegation=(
-                issue_guest_support_credit_request_delegation(security, task)
+            reservations_delegation=issue_reservations_delegation(security, task),
+            property_operations_delegation=issue_property_operations_delegation(security, task),
+            guest_support_message_delegation=issue_guest_support_message_delegation(security, task),
+            service_recovery_delegation=issue_service_recovery_delegation(security, task),
+            service_recovery_credit_request_delegation=(
+                issue_service_recovery_credit_request_delegation(security, task)
             ),
         )
         trusted_tasks.register(context)
 
         try:
-            async with build_guest_operations_mcp_client() as mcp_server:
-                guest_support_agent = build_guest_support_agent(mcp_server)
-                supervisor_agent = build_supervisor_agent(guest_support_agent)
+            async with (
+                build_reservations_mcp_client() as reservations_mcp,
+                build_property_operations_mcp_client() as property_operations_mcp,
+                build_guest_support_mcp_client() as guest_support_mcp,
+                build_service_recovery_mcp_client() as service_recovery_mcp,
+            ):
+                reservations_agent = build_reservations_agent(reservations_mcp)
+                property_operations_agent = build_property_operations_agent(property_operations_mcp)
+                guest_support_agent = build_guest_support_agent(guest_support_mcp)
+                service_recovery_agent = build_service_recovery_agent(service_recovery_mcp)
+                supervisor_agent = build_supervisor_agent(
+                    reservations_agent,
+                    property_operations_agent,
+                    guest_support_agent,
+                    service_recovery_agent,
+                )
                 result = await Runner.run(
                     supervisor_agent,
                     request.message,
@@ -417,7 +458,7 @@ async def dev_issue_credit(
             purpose="direct guest credit test",
             expires_at=datetime.now(UTC) + timedelta(minutes=30),
         )
-        delegation_chain = issue_guest_support_delegation(security, task)
+        delegation_chain = issue_service_recovery_delegation(security, task)
 
         result = credit_tool.issue_credit(
             reservation_id=request.reservation_id,
@@ -471,7 +512,7 @@ def dev_get_reservation(
             purpose="direct reservation read test",
             expires_at=datetime.now(UTC) + timedelta(minutes=30),
         )
-        delegation_chain = issue_guest_support_reservation_delegation(security, task)
+        delegation_chain = issue_reservations_delegation(security, task)
         result = reservation_tool.get_reservation(
             reservation_id=reservation_id,
             task=task,

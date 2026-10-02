@@ -1,4 +1,4 @@
-"""MCP tool surface for Asante guest operations with OTel propagation."""
+"""MCP tool surface for least-privilege Asante specialist agents."""
 
 from __future__ import annotations
 
@@ -7,6 +7,12 @@ from mcp.server.mcpserver.exceptions import ToolError
 from opentelemetry import propagate
 from opentelemetry.trace import Status, StatusCode
 
+from asante_secure_multi_agent.identity import (
+    GUEST_SUPPORT_WORKLOAD,
+    PROPERTY_OPERATIONS_WORKLOAD,
+    RESERVATIONS_WORKLOAD,
+    SERVICE_RECOVERY_WORKLOAD,
+)
 from asante_secure_multi_agent.telemetry import get_tracer
 from asante_secure_multi_agent.telemetry.metrics import record_mcp_call
 from asante_secure_multi_agent.tools import (
@@ -15,7 +21,7 @@ from asante_secure_multi_agent.tools import (
     SecuredReservationTool,
 )
 
-from .client import ASANTE_TASK_META_KEY
+from .client import ASANTE_TASK_META_KEY, ASANTE_WORKLOAD_META_KEY
 from .registry import TrustedTaskNotFoundError, TrustedTaskRegistry
 
 _tracer = get_tracer()
@@ -30,14 +36,14 @@ def issue_guest_credit_for_trusted_task(
     amount: float,
     reason: str,
 ) -> dict[str, object]:
-    """Resolve canonical authority and execute the Ruhusa-secured credit path."""
+    """Resolve canonical Service Recovery authority and execute a secured credit."""
     run_context = task_registry.require(task_id)
     return credit_tool.issue_credit(
         reservation_id=reservation_id,
         amount=amount,
         reason=reason,
         task=run_context.task,
-        delegation_chain=run_context.guest_support_delegation,
+        delegation_chain=run_context.service_recovery_delegation,
     )
 
 
@@ -48,16 +54,12 @@ def get_reservation_for_trusted_task(
     task_id: str,
     reservation_id: str,
 ) -> dict[str, object]:
-    """Resolve canonical authority and execute the secured reservation-read path."""
+    """Resolve canonical Reservations authority and execute the secured read."""
     run_context = task_registry.require(task_id)
     return reservation_tool.get_reservation(
         reservation_id=reservation_id,
         task=run_context.task,
-        delegation_chain=(
-            run_context.guest_support_reservation_delegation
-            if run_context.guest_support_reservation_delegation is not None
-            else run_context.guest_support_delegation
-        ),
+        delegation_chain=run_context.reservations_delegation,
     )
 
 
@@ -71,18 +73,15 @@ def create_maintenance_for_trusted_task(
     urgency: str,
     description: str,
 ) -> dict[str, object]:
-    """Create a work order from trusted task-bound service authority."""
+    """Create a work order from Property Operations authority."""
     run_context = task_registry.require(task_id)
-    chain = run_context.guest_support_service_delegation
-    if chain is None:
-        raise TrustedTaskNotFoundError("guest service delegation is unavailable")
     return operations_tool.create_maintenance_request(
         reservation_id=reservation_id,
         category=category,
         urgency=urgency,
         description=description,
         task=run_context.task,
-        delegation_chain=chain,
+        delegation_chain=run_context.property_operations_delegation,
     )
 
 
@@ -94,16 +93,13 @@ def send_guest_message_for_trusted_task(
     reservation_id: str,
     message: str,
 ) -> dict[str, object]:
-    """Send a guest update from trusted task-bound service authority."""
+    """Send a guest update from Guest Support authority."""
     run_context = task_registry.require(task_id)
-    chain = run_context.guest_support_service_delegation
-    if chain is None:
-        raise TrustedTaskNotFoundError("guest service delegation is unavailable")
     return operations_tool.send_guest_message(
         reservation_id=reservation_id,
         message=message,
         task=run_context.task,
-        delegation_chain=chain,
+        delegation_chain=run_context.guest_support_message_delegation,
     )
 
 
@@ -116,17 +112,14 @@ def request_guest_credit_for_trusted_task(
     amount: float,
     reason: str,
 ) -> dict[str, object]:
-    """Create a durable approval request without granting execution authority."""
+    """Create a durable approval request from Service Recovery authority."""
     run_context = task_registry.require(task_id)
-    chain = run_context.guest_support_credit_request_delegation
-    if chain is None:
-        raise TrustedTaskNotFoundError("credit-request delegation is unavailable")
     return operations_tool.request_guest_credit(
         reservation_id=reservation_id,
         amount=amount,
         reason=reason,
         task=run_context.task,
-        delegation_chain=chain,
+        delegation_chain=run_context.service_recovery_credit_request_delegation,
     )
 
 
@@ -143,6 +136,21 @@ def _task_id_from_meta(meta: dict[str, object]) -> str:
     return task_id
 
 
+def _workload_from_meta(meta: dict[str, object]) -> str:
+    """Extract the trusted runtime workload label injected by the MCP client."""
+    workload = meta.get(ASANTE_WORKLOAD_META_KEY)
+    if not isinstance(workload, str) or not workload:
+        raise ToolError("missing trusted Asante workload context")
+    return workload
+
+
+def _require_specialist(meta: dict[str, object], expected_workload: str) -> None:
+    """Fail closed when a specialist attempts a tool outside its runtime boundary."""
+    actual = _workload_from_meta(meta)
+    if actual != expected_workload:
+        raise ToolError(f"tool is not available to workload {actual}; expected {expected_workload}")
+
+
 def _task_id_from_mcp_context(ctx: Context) -> str:
     """Backward-compatible helper retained for MCP boundary regression tests."""
     return _task_id_from_meta(_mcp_meta(ctx))
@@ -154,14 +162,13 @@ def build_guest_operations_mcp_server(
     reservation_tool: SecuredReservationTool | None = None,
     operations_tool: SecuredGuestOperationsTool | None = None,
 ) -> MCPServer:
-    """Build the Streamable HTTP MCP server consumed by Guest Support."""
+    """Build the shared MCP endpoint; clients expose least-privilege tool subsets."""
     server = MCPServer(
-        "Asante Guest Operations MCP",
+        "Asante Property Operations MCP",
         instructions=(
-            "Asante guest-operation tools. Tool calls are subject to Ruhusa "
-            "delegated authorization and execution-time revalidation. Cached "
-            "reservation results never bypass authorization, and larger credits "
-            "must use the approval-request tool rather than bypassing limits."
+            "Asante property-operation tools. Each specialist receives a filtered tool "
+            "view and a trusted runtime workload label. Ruhusa independently validates "
+            "the specialist principal, task-bound delegation, and execution lifecycle."
         ),
     )
 
@@ -172,8 +179,9 @@ def build_guest_operations_mcp_server(
         reason: str,
         ctx: Context,
     ) -> dict[str, object]:
-        """Issue a small credit using hidden canonical authority."""
+        """Issue a small credit using Service Recovery authority."""
         meta = _mcp_meta(ctx)
+        _require_specialist(meta, SERVICE_RECOVERY_WORKLOAD)
         task_id = _task_id_from_meta(meta)
         parent_context = propagate.extract(meta)
         with _tracer.start_as_current_span(
@@ -182,6 +190,7 @@ def build_guest_operations_mcp_server(
             attributes={
                 "mcp.tool.name": "issue_guest_credit",
                 "asante.action": "guest.credit.issue",
+                "asante.workload": SERVICE_RECOVERY_WORKLOAD,
                 "asante.resource.kind": "reservation",
             },
         ) as span:
@@ -211,8 +220,9 @@ def build_guest_operations_mcp_server(
             reservation_id: str,
             ctx: Context,
         ) -> dict[str, object]:
-            """Read reservation data only after live Ruhusa authorization."""
+            """Read reservation data using Reservations specialist authority."""
             meta = _mcp_meta(ctx)
+            _require_specialist(meta, RESERVATIONS_WORKLOAD)
             task_id = _task_id_from_meta(meta)
             parent_context = propagate.extract(meta)
             with _tracer.start_as_current_span(
@@ -221,6 +231,7 @@ def build_guest_operations_mcp_server(
                 attributes={
                     "mcp.tool.name": "get_reservation",
                     "asante.action": "reservation.read",
+                    "asante.workload": RESERVATIONS_WORKLOAD,
                     "asante.resource.kind": "reservation",
                 },
             ) as span:
@@ -251,8 +262,9 @@ def build_guest_operations_mcp_server(
             description: str,
             ctx: Context,
         ) -> dict[str, object]:
-            """Create an authorized maintenance work order for a reservation."""
+            """Create a maintenance work order using Property Operations authority."""
             meta = _mcp_meta(ctx)
+            _require_specialist(meta, PROPERTY_OPERATIONS_WORKLOAD)
             task_id = _task_id_from_meta(meta)
             parent_context = propagate.extract(meta)
             with _tracer.start_as_current_span(
@@ -261,6 +273,7 @@ def build_guest_operations_mcp_server(
                 attributes={
                     "mcp.tool.name": "create_maintenance_request",
                     "asante.action": "maintenance.create",
+                    "asante.workload": PROPERTY_OPERATIONS_WORKLOAD,
                 },
             ):
                 try:
@@ -286,8 +299,9 @@ def build_guest_operations_mcp_server(
             message: str,
             ctx: Context,
         ) -> dict[str, object]:
-            """Send an authorized operational update to the guest."""
+            """Send an operational update using Guest Support authority."""
             meta = _mcp_meta(ctx)
+            _require_specialist(meta, GUEST_SUPPORT_WORKLOAD)
             task_id = _task_id_from_meta(meta)
             parent_context = propagate.extract(meta)
             with _tracer.start_as_current_span(
@@ -296,6 +310,7 @@ def build_guest_operations_mcp_server(
                 attributes={
                     "mcp.tool.name": "send_guest_message",
                     "asante.action": "guest.message.send",
+                    "asante.workload": GUEST_SUPPORT_WORKLOAD,
                 },
             ):
                 try:
@@ -320,8 +335,9 @@ def build_guest_operations_mcp_server(
             reason: str,
             ctx: Context,
         ) -> dict[str, object]:
-            """Create a durable human-approval request for a larger credit."""
+            """Create a durable approval request using Service Recovery authority."""
             meta = _mcp_meta(ctx)
+            _require_specialist(meta, SERVICE_RECOVERY_WORKLOAD)
             task_id = _task_id_from_meta(meta)
             parent_context = propagate.extract(meta)
             with _tracer.start_as_current_span(
@@ -330,6 +346,7 @@ def build_guest_operations_mcp_server(
                 attributes={
                     "mcp.tool.name": "request_guest_credit",
                     "asante.action": "guest.credit.request",
+                    "asante.workload": SERVICE_RECOVERY_WORKLOAD,
                 },
             ):
                 try:

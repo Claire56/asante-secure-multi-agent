@@ -12,6 +12,9 @@ from jwt import InvalidTokenError
 from asante_secure_multi_agent.api_models import DemoCreditRequest, RunRequest
 from asante_secure_multi_agent.identity import (
     GUEST_SUPPORT_WORKLOAD,
+    PROPERTY_OPERATIONS_WORKLOAD,
+    RESERVATIONS_WORKLOAD,
+    SERVICE_RECOVERY_WORKLOAD,
     SUPERVISOR_WORKLOAD,
     DevHmacAccessTokenVerifier,
     StaticSpiffeWorkloadIdentityProvider,
@@ -95,10 +98,29 @@ def test_workload_provider_assigns_distinct_spiffe_ids() -> None:
     provider = StaticSpiffeWorkloadIdentityProvider("asante.jamiiz.io")
     supervisor = provider.require(SUPERVISOR_WORKLOAD)
     guest_support = provider.require(GUEST_SUPPORT_WORKLOAD)
+    property_operations = provider.require(PROPERTY_OPERATIONS_WORKLOAD)
+    reservations = provider.require(RESERVATIONS_WORKLOAD)
+    service_recovery = provider.require(SERVICE_RECOVERY_WORKLOAD)
 
     assert supervisor.principal_id == "spiffe://asante.jamiiz.io/agents/supervisor"
     assert guest_support.principal_id == "spiffe://asante.jamiiz.io/agents/guest-support"
-    assert supervisor.principal_id != guest_support.principal_id
+    assert property_operations.principal_id == (
+        "spiffe://asante.jamiiz.io/agents/property-operations"
+    )
+    assert reservations.principal_id == "spiffe://asante.jamiiz.io/agents/reservations"
+    assert service_recovery.principal_id == ("spiffe://asante.jamiiz.io/agents/service-recovery")
+    assert (
+        len(
+            {
+                supervisor.principal_id,
+                guest_support.principal_id,
+                property_operations.principal_id,
+                reservations.principal_id,
+                service_recovery.principal_id,
+            }
+        )
+        == 5
+    )
 
 
 def test_authenticated_human_becomes_delegation_root() -> None:
@@ -107,7 +129,7 @@ def test_authenticated_human_becomes_delegation_root() -> None:
 
     from asante_secure_multi_agent.security import (
         build_security_runtime,
-        issue_guest_support_delegation,
+        issue_service_recovery_delegation,
     )
 
     human = DevHmacAccessTokenVerifier().verify(
@@ -126,7 +148,7 @@ def test_authenticated_human_becomes_delegation_root() -> None:
         expires_at=datetime.now(UTC) + timedelta(minutes=30),
     )
 
-    root, child = issue_guest_support_delegation(security, task)
+    root, child = issue_service_recovery_delegation(security, task)
 
     assert root.grantor_id == human.principal_id
     assert root.grantee_id.startswith("spiffe://")

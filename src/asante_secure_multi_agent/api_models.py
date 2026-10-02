@@ -32,8 +32,8 @@ class DemoCreditRequest(BaseModel):
     )
     amount: float = Field(
         gt=0,
-        description="Credit amount in USD. Guest support is delegated up to $25; "
-        "larger amounts are denied by Ruhusa.",
+        description="Credit amount in USD. Service Recovery is delegated up to $25 on "
+        "the direct-issue path; larger amounts require the approval workflow.",
     )
     reason: str = Field(min_length=1, description="Service-recovery reason for the credit.")
 
@@ -66,6 +66,7 @@ class ServiceInfoResponse(BaseModel):
     whoami: str
     mcp: str
     operations: dict[str, str]
+    specialists: dict[str, str]
     auth: str
     workload_identity: str
     observability: str
@@ -109,7 +110,7 @@ class AgentRunResponse(BaseModel):
     )
     last_agent: str = Field(
         description="Agent that produced the final response.",
-        examples=["Asante Guest Support Agent"],
+        examples=["Asante Operations Supervisor"],
     )
     output: str = Field(description="Final natural-language agent response.")
 
@@ -139,7 +140,7 @@ class CreditIssuedResponse(BaseModel):
     effect: Literal["allow"]
     policy_id: str | None = Field(
         default=None,
-        examples=["guest-support-small-credit"],
+        examples=["service-recovery-small-credit"],
     )
 
 

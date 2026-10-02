@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from opentelemetry.trace import Status, StatusCode
 from ruhusa import DecisionEffect, DelegationGrant, Principal, TaskContext
 
-from asante_secure_multi_agent.identity import GUEST_SUPPORT_WORKLOAD, SUPERVISOR_WORKLOAD
+from asante_secure_multi_agent.identity import SERVICE_RECOVERY_WORKLOAD, SUPERVISOR_WORKLOAD
 from asante_secure_multi_agent.reliability import (
     CreditProvider,
     RetryPolicy,
@@ -103,10 +103,10 @@ class SecuredGuestCreditTool:
             supervisor_id = self.security.workload_identities.require(
                 SUPERVISOR_WORKLOAD
             ).principal_id
-            guest_support_id = self.security.workload_identities.require(
-                GUEST_SUPPORT_WORKLOAD
+            service_recovery_id = self.security.workload_identities.require(
+                SERVICE_RECOVERY_WORKLOAD
             ).principal_id
-            principal = Principal(principal_id=guest_support_id, principal_type="agent")
+            principal = Principal(principal_id=service_recovery_id, principal_type="agent")
             now = datetime.now(UTC)
             invocation_expiry = min(task.expires_at, now + timedelta(minutes=5))
 

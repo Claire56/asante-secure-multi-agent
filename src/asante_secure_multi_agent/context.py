@@ -1,4 +1,4 @@
-"""Typed runtime context shared across the Asante agent handoff."""
+"""Typed trusted runtime context shared across the Asante agent workflow."""
 
 from __future__ import annotations
 
@@ -9,10 +9,11 @@ from ruhusa import DelegationGrant, TaskContext
 
 @dataclass(frozen=True)
 class AsanteRunContext:
-    """Trusted task and capability-specific delegation state for one agent run."""
+    """Trusted task and specialist-specific delegation state for one agent run."""
 
     task: TaskContext
-    guest_support_delegation: tuple[DelegationGrant, ...]
-    guest_support_reservation_delegation: tuple[DelegationGrant, ...] | None = None
-    guest_support_service_delegation: tuple[DelegationGrant, ...] | None = None
-    guest_support_credit_request_delegation: tuple[DelegationGrant, ...] | None = None
+    reservations_delegation: tuple[DelegationGrant, ...]
+    property_operations_delegation: tuple[DelegationGrant, ...]
+    guest_support_message_delegation: tuple[DelegationGrant, ...]
+    service_recovery_delegation: tuple[DelegationGrant, ...]
+    service_recovery_credit_request_delegation: tuple[DelegationGrant, ...]

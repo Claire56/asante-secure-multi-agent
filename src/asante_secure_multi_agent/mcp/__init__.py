@@ -2,8 +2,13 @@
 
 from .client import (
     ASANTE_TASK_META_KEY,
+    ASANTE_WORKLOAD_META_KEY,
     DEFAULT_ASANTE_MCP_URL,
     build_guest_operations_mcp_client,
+    build_guest_support_mcp_client,
+    build_property_operations_mcp_client,
+    build_reservations_mcp_client,
+    build_service_recovery_mcp_client,
     resolve_asante_mcp_meta,
 )
 from .registry import TrustedTaskNotFoundError, TrustedTaskRegistry
@@ -18,11 +23,16 @@ from .server import (
 
 __all__ = [
     "ASANTE_TASK_META_KEY",
+    "ASANTE_WORKLOAD_META_KEY",
     "DEFAULT_ASANTE_MCP_URL",
     "TrustedTaskNotFoundError",
     "TrustedTaskRegistry",
     "build_guest_operations_mcp_client",
     "build_guest_operations_mcp_server",
+    "build_guest_support_mcp_client",
+    "build_property_operations_mcp_client",
+    "build_reservations_mcp_client",
+    "build_service_recovery_mcp_client",
     "create_maintenance_for_trusted_task",
     "get_reservation_for_trusted_task",
     "issue_guest_credit_for_trusted_task",

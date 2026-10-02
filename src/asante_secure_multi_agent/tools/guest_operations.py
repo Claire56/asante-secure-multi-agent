@@ -12,7 +12,12 @@ from opentelemetry.trace import Status, StatusCode
 from ruhusa import DecisionEffect, DelegationGrant, Principal, TaskContext
 
 from asante_secure_multi_agent.approvals import SQLiteApprovalStore
-from asante_secure_multi_agent.identity import GUEST_SUPPORT_WORKLOAD, SUPERVISOR_WORKLOAD
+from asante_secure_multi_agent.identity import (
+    GUEST_SUPPORT_WORKLOAD,
+    PROPERTY_OPERATIONS_WORKLOAD,
+    SERVICE_RECOVERY_WORKLOAD,
+    SUPERVISOR_WORKLOAD,
+)
 from asante_secure_multi_agent.security.runtime import (
     GUEST_OPERATIONS_TOOL_ID,
     GUEST_OPERATIONS_TOOL_IMPLEMENTATION,
@@ -134,6 +139,7 @@ class SecuredGuestOperationsTool:
         key = _idempotency_key("maintenance.create", task.task_id, reservation_id, payload)
         return self._execute(
             action="maintenance.create",
+            executing_workload=PROPERTY_OPERATIONS_WORKLOAD,
             reservation_id=reservation_id,
             arguments={
                 "category": category,
@@ -170,6 +176,7 @@ class SecuredGuestOperationsTool:
         )
         return self._execute(
             action="guest.message.send",
+            executing_workload=GUEST_SUPPORT_WORKLOAD,
             reservation_id=reservation_id,
             arguments={"message": message},
             task=task,
@@ -204,7 +211,7 @@ class SecuredGuestOperationsTool:
                 reservation_id=reservation_id,
                 amount=amount,
                 reason=reason,
-                policy_id="guest-support-credit-request",
+                policy_id="service-recovery-credit-request",
             )
             return {
                 # A repeated request reports the existing record's real state.
@@ -218,6 +225,7 @@ class SecuredGuestOperationsTool:
 
         return self._execute(
             action="guest.credit.request",
+            executing_workload=SERVICE_RECOVERY_WORKLOAD,
             reservation_id=reservation_id,
             arguments={"amount": amount, "reason": reason},
             task=task,
@@ -229,6 +237,7 @@ class SecuredGuestOperationsTool:
         self,
         *,
         action: str,
+        executing_workload: str,
         reservation_id: str,
         arguments: dict[str, object],
         task: TaskContext,
@@ -241,15 +250,19 @@ class SecuredGuestOperationsTool:
                 "asante.action": action,
                 "asante.resource.kind": "reservation",
                 "asante.delegation.depth": len(delegation_chain),
+                "asante.workload": executing_workload,
             },
         ) as execution_span:
             supervisor_id = self.security.workload_identities.require(
                 SUPERVISOR_WORKLOAD
             ).principal_id
-            guest_support_id = self.security.workload_identities.require(
-                GUEST_SUPPORT_WORKLOAD
+            executing_principal_id = self.security.workload_identities.require(
+                executing_workload
             ).principal_id
-            principal = Principal(principal_id=guest_support_id, principal_type="agent")
+            principal = Principal(
+                principal_id=executing_principal_id,
+                principal_type="agent",
+            )
             now = datetime.now(UTC)
             invocation_expiry = min(task.expires_at, now + timedelta(minutes=5))
             prepared = self.security.invocation_factory.create(

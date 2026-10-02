@@ -1,4 +1,4 @@
-"""Phase 8 product workflow tests: maintenance, messaging, and human approval."""
+"""Phase 9 specialist-aware product workflow tests."""
 
 from __future__ import annotations
 
@@ -16,10 +16,11 @@ from asante_secure_multi_agent.mcp import TrustedTaskRegistry, build_guest_opera
 from asante_secure_multi_agent.security import (
     build_security_runtime,
     issue_approval_executor_delegation,
-    issue_guest_support_credit_request_delegation,
-    issue_guest_support_delegation,
-    issue_guest_support_reservation_delegation,
-    issue_guest_support_service_delegation,
+    issue_guest_support_message_delegation,
+    issue_property_operations_delegation,
+    issue_reservations_delegation,
+    issue_service_recovery_credit_request_delegation,
+    issue_service_recovery_delegation,
 )
 from asante_secure_multi_agent.tools import (
     ApprovedCreditExecutor,
@@ -58,7 +59,7 @@ def test_maintenance_request_is_authorized_and_persisted() -> None:
         urgency="high",
         description="Guest reports no hot water for two hours",
         task=task,
-        delegation_chain=issue_guest_support_service_delegation(security, task),
+        delegation_chain=issue_property_operations_delegation(security, task),
     )
 
     assert result["status"] == "open"
@@ -70,7 +71,7 @@ def test_maintenance_request_is_authorized_and_persisted() -> None:
 def test_guest_message_is_authorized_and_idempotent_within_task() -> None:
     security, _, messages, approvals, tool = _operations_fixture()
     task = _task()
-    chain = issue_guest_support_service_delegation(security, task)
+    chain = issue_guest_support_message_delegation(security, task)
 
     first = tool.send_guest_message(
         reservation_id="R-3001",
@@ -102,7 +103,7 @@ def test_larger_credit_creates_approval_without_credit_side_effect() -> None:
         amount=75.0,
         reason="Extended hot-water outage",
         task=task,
-        delegation_chain=issue_guest_support_credit_request_delegation(security, task),
+        delegation_chain=issue_service_recovery_credit_request_delegation(security, task),
     )
 
     assert result["status"] == "approval_pending"
@@ -125,7 +126,7 @@ def test_repeated_credit_request_in_one_task_reuses_the_approval() -> None:
             amount=75.0,
             reason="Extended hot-water outage",
             task=task,
-            delegation_chain=issue_guest_support_credit_request_delegation(security, task),
+            delegation_chain=issue_service_recovery_credit_request_delegation(security, task),
         )
 
     first = request()
@@ -143,7 +144,7 @@ def test_repeated_credit_request_in_one_task_reuses_the_approval() -> None:
         amount=75.0,
         reason="Extended hot-water outage",
         task=other_task,
-        delegation_chain=issue_guest_support_credit_request_delegation(security, other_task),
+        delegation_chain=issue_service_recovery_credit_request_delegation(security, other_task),
     )
     assert third["approval_id"] != first["approval_id"]
     assert len(approvals.list_requests()) == 2
@@ -158,7 +159,7 @@ def test_credit_request_above_human_approval_limit_is_denied() -> None:
         amount=150.0,
         reason="Oversized requested credit",
         task=task,
-        delegation_chain=issue_guest_support_credit_request_delegation(security, task),
+        delegation_chain=issue_service_recovery_credit_request_delegation(security, task),
     )
 
     assert result["status"] == "blocked"
@@ -176,7 +177,7 @@ def test_human_approval_executes_credit_once() -> None:
         amount=75.0,
         reason="Extended service outage",
         task=request_task,
-        delegation_chain=issue_guest_support_credit_request_delegation(security, request_task),
+        delegation_chain=issue_service_recovery_credit_request_delegation(security, request_task),
     )
     approval_id = str(requested["approval_id"])
     approved = approvals.decide(
@@ -221,7 +222,7 @@ def test_human_denial_never_executes_credit() -> None:
         amount=60.0,
         reason="Service complaint",
         task=request_task,
-        delegation_chain=issue_guest_support_credit_request_delegation(security, request_task),
+        delegation_chain=issue_service_recovery_credit_request_delegation(security, request_task),
     )
     record = approvals.decide(
         str(requested["approval_id"]),
@@ -250,7 +251,7 @@ def test_approval_record_survives_store_reopen() -> None:
             reservation_id="R-3001",
             amount=75.0,
             reason="Extended outage",
-            policy_id="guest-support-credit-request",
+            policy_id="service-recovery-credit-request",
         )
         store.close()
 
@@ -266,13 +267,12 @@ def test_mcp_product_tool_schemas_hide_authority() -> None:
     task = _task("mcp-product")
     context = AsanteRunContext(
         task=task,
-        guest_support_delegation=issue_guest_support_delegation(security, task),
-        guest_support_reservation_delegation=issue_guest_support_reservation_delegation(
-            security, task
-        ),
-        guest_support_service_delegation=issue_guest_support_service_delegation(security, task),
-        guest_support_credit_request_delegation=(
-            issue_guest_support_credit_request_delegation(security, task)
+        reservations_delegation=issue_reservations_delegation(security, task),
+        property_operations_delegation=issue_property_operations_delegation(security, task),
+        guest_support_message_delegation=issue_guest_support_message_delegation(security, task),
+        service_recovery_delegation=issue_service_recovery_delegation(security, task),
+        service_recovery_credit_request_delegation=(
+            issue_service_recovery_credit_request_delegation(security, task)
         ),
     )
     registry = TrustedTaskRegistry()

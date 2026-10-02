@@ -60,8 +60,19 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Create a local Asante Phase 4 access token")
     parser.add_argument("subject", help="human subject, for example claire")
     parser.add_argument("--minutes", type=int, default=30, help="token lifetime")
+    parser.add_argument(
+        "--scope",
+        default="asante:operate",
+        help="space-separated OAuth scopes for local testing",
+    )
     args = parser.parse_args()
-    print(create_dev_access_token(args.subject, lifetime_minutes=args.minutes))
+    print(
+        create_dev_access_token(
+            args.subject,
+            lifetime_minutes=args.minutes,
+            scope=args.scope,
+        )
+    )
 
 
 if __name__ == "__main__":

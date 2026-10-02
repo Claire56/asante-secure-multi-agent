@@ -1,8 +1,9 @@
-"""Local Ruhusa runtime for secured Asante guest operations.
+"""Local Ruhusa runtime for secured Asante property operations.
 
-Phase 7 adds a protected reservation-read tool alongside the existing guest-credit
-write path. Ruhusa remains independent of authentication, MCP, telemetry, and
-caching. Cache hits never bypass authorization or execution-time revalidation.
+Phase 8 turns the reference stack into a usable Asante operations slice:
+reservation reads, guest credits, guest messaging, maintenance work orders, and
+human-approved credits all remain behind trusted Ruhusa provenance and
+execution-time revalidation.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from ruhusa import (
 from ruhusa.integrations.trusted import TrustedInvocationFactory
 
 from asante_secure_multi_agent.identity import (
+    APPROVAL_EXECUTOR_WORKLOAD,
     GUEST_SUPPORT_WORKLOAD,
     StaticSpiffeWorkloadIdentityProvider,
     WorkloadIdentityProvider,
@@ -33,6 +35,10 @@ CREDIT_TOOL_ID = "asante.guest-credit"
 CREDIT_TOOL_IMPLEMENTATION = "asante.guest-credit@0.7.0"
 RESERVATION_TOOL_ID = "asante.reservation-reader"
 RESERVATION_TOOL_IMPLEMENTATION = "asante.reservation-reader@0.7.0"
+GUEST_OPERATIONS_TOOL_ID = "asante.guest-operations"
+GUEST_OPERATIONS_TOOL_IMPLEMENTATION = "asante.guest-operations@0.8.0"
+APPROVED_CREDIT_TOOL_ID = "asante.approved-credit"
+APPROVED_CREDIT_TOOL_IMPLEMENTATION = "asante.approved-credit@0.8.0"
 
 
 @dataclass(frozen=True)
@@ -56,12 +62,43 @@ def _credit_at_most(limit: float):
     return condition
 
 
+def _credit_request_between(lower_exclusive: float, upper_inclusive: float):
+    """Match service-credit approval requests in the configured amount band."""
+
+    def condition(request) -> bool:
+        amount = request.arguments.get("amount")
+        return (
+            isinstance(amount, (int, float)) and lower_exclusive < float(amount) <= upper_inclusive
+        )
+
+    return condition
+
+
+def _verified_approved_credit(limit: float):
+    """Allow only trusted approval-executor requests with verified evidence."""
+
+    def condition(request) -> bool:
+        amount = request.arguments.get("amount")
+        verified = request.arguments.get("approval_verified") is True
+        approval_id = request.arguments.get("approval_id")
+        return (
+            verified
+            and isinstance(approval_id, str)
+            and bool(approval_id)
+            and isinstance(amount, (int, float))
+            and 0 < float(amount) <= limit
+        )
+
+    return condition
+
+
 def build_security_runtime(
     workload_identities: WorkloadIdentityProvider | None = None,
 ) -> AsanteSecurityRuntime:
-    """Build the local security boundary for Asante guest-operation workflows."""
+    """Build the local security boundary for Asante property operations."""
     identity_provider = workload_identities or StaticSpiffeWorkloadIdentityProvider()
     guest_support_id = identity_provider.require(GUEST_SUPPORT_WORKLOAD).principal_id
+    approval_executor_id = identity_provider.require(APPROVAL_EXECUTOR_WORKLOAD).principal_id
 
     grant_store = InMemoryGrantStore()
     invocation_store = InMemoryInvocationStore()
@@ -80,6 +117,22 @@ def build_security_runtime(
             allowed_actions=frozenset({"reservation.read"}),
         )
     )
+    tool_registry.register(
+        ToolRegistration(
+            tool_id=GUEST_OPERATIONS_TOOL_ID,
+            implementation_id=GUEST_OPERATIONS_TOOL_IMPLEMENTATION,
+            allowed_actions=frozenset(
+                {"maintenance.create", "guest.message.send", "guest.credit.request"}
+            ),
+        )
+    )
+    tool_registry.register(
+        ToolRegistration(
+            tool_id=APPROVED_CREDIT_TOOL_ID,
+            implementation_id=APPROVED_CREDIT_TOOL_IMPLEMENTATION,
+            allowed_actions=frozenset({"guest.credit.issue.approved"}),
+        )
+    )
 
     policies = StaticPolicyStore(
         rules=(
@@ -90,6 +143,31 @@ def build_security_runtime(
                 principal_ids=frozenset({guest_support_id}),
                 resource_prefixes=("reservation:",),
                 reason="guest support may read reservations within delegated scope",
+            ),
+            PolicyRule(
+                policy_id="guest-support-maintenance-create",
+                effect=DecisionEffect.ALLOW,
+                actions=frozenset({"maintenance.create"}),
+                principal_ids=frozenset({guest_support_id}),
+                resource_prefixes=("reservation:",),
+                reason="guest support may create maintenance work orders",
+            ),
+            PolicyRule(
+                policy_id="guest-support-message-send",
+                effect=DecisionEffect.ALLOW,
+                actions=frozenset({"guest.message.send"}),
+                principal_ids=frozenset({guest_support_id}),
+                resource_prefixes=("reservation:",),
+                reason="guest support may send operational guest updates",
+            ),
+            PolicyRule(
+                policy_id="guest-support-credit-request",
+                effect=DecisionEffect.ALLOW,
+                actions=frozenset({"guest.credit.request"}),
+                principal_ids=frozenset({guest_support_id}),
+                resource_prefixes=("reservation:",),
+                condition=_credit_request_between(25.0, 100.0),
+                reason="guest support may request human approval for credits above $25 up to $100",
             ),
             PolicyRule(
                 policy_id="guest-support-small-credit",
@@ -109,6 +187,15 @@ def build_security_runtime(
                 condition=_credit_at_most(100.0),
                 reason="credits above $25 and up to $100 require human approval",
                 obligations=("human_approval",),
+            ),
+            PolicyRule(
+                policy_id="approved-credit-executor",
+                effect=DecisionEffect.ALLOW,
+                actions=frozenset({"guest.credit.issue.approved"}),
+                principal_ids=frozenset({approval_executor_id}),
+                resource_prefixes=("reservation:",),
+                condition=_verified_approved_credit(100.0),
+                reason="trusted approval executor may issue a human-approved credit up to $100",
             ),
         )
     )

@@ -14,3 +14,5 @@ class AsanteRunContext:
     task: TaskContext
     guest_support_delegation: tuple[DelegationGrant, ...]
     guest_support_reservation_delegation: tuple[DelegationGrant, ...] | None = None
+    guest_support_service_delegation: tuple[DelegationGrant, ...] | None = None
+    guest_support_credit_request_delegation: tuple[DelegationGrant, ...] | None = None

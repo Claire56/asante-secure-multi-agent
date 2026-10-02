@@ -7,6 +7,7 @@ from .human import (
     require_authenticated_human,
 )
 from .workload import (
+    APPROVAL_EXECUTOR_WORKLOAD,
     GUEST_SUPPORT_WORKLOAD,
     SUPERVISOR_WORKLOAD,
     StaticSpiffeWorkloadIdentityProvider,
@@ -15,6 +16,7 @@ from .workload import (
 )
 
 __all__ = [
+    "APPROVAL_EXECUTOR_WORKLOAD",
     "GUEST_SUPPORT_WORKLOAD",
     "SUPERVISOR_WORKLOAD",
     "AuthenticatedHuman",

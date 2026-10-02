@@ -175,3 +175,18 @@ def test_bearer_credentials_resolve_authenticated_human(monkeypatch) -> None:
 
     assert human.principal_id == "oauth:https://dev.asante.local#claire"
     get_access_token_verifier.cache_clear()
+
+
+def test_dev_token_can_carry_explicit_approval_scope() -> None:
+    """Local manager tokens can model separation of duties for approval testing."""
+    token = create_dev_access_token(
+        "manager",
+        scope="asante:operate asante:approve",
+        issuer="https://dev.asante.local",
+        audience="asante-secure-multi-agent",
+        secret="asante-local-development-only-change-me",
+    )
+    human = DevHmacAccessTokenVerifier().verify(token)
+
+    assert "asante:operate" in human.scopes
+    assert "asante:approve" in human.scopes

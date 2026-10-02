@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 
 SUPERVISOR_WORKLOAD = "supervisor"
 GUEST_SUPPORT_WORKLOAD = "guest-support"
+APPROVAL_EXECUTOR_WORKLOAD = "approval-executor"
 DEFAULT_SPIFFE_TRUST_DOMAIN = "asante.jamiiz.io"
 
 
@@ -61,6 +62,10 @@ class StaticSpiffeWorkloadIdentityProvider:
             GUEST_SUPPORT_WORKLOAD: WorkloadIdentity(
                 workload=GUEST_SUPPORT_WORKLOAD,
                 principal_id=_spiffe_id(domain, "agents/guest-support"),
+            ),
+            APPROVAL_EXECUTOR_WORKLOAD: WorkloadIdentity(
+                workload=APPROVAL_EXECUTOR_WORKLOAD,
+                principal_id=_spiffe_id(domain, "services/approval-executor"),
             ),
         }
 

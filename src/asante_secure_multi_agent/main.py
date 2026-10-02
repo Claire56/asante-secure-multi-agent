@@ -20,7 +20,20 @@ from opentelemetry.trace import Status, StatusCode
 from ruhusa import TaskContext
 
 from asante_secure_multi_agent.agents import build_guest_support_agent, build_supervisor_agent
-from asante_secure_multi_agent.api_models import DemoCreditRequest, RunRequest
+from asante_secure_multi_agent.api_models import (
+    AgentRunResponse,
+    CreditBlockedResponse,
+    CreditIssuedResponse,
+    CreditRecord,
+    DemoCreditRequest,
+    HealthResponse,
+    ReservationBlockedResponse,
+    ReservationFoundResponse,
+    ReservationNotFoundResponse,
+    RunRequest,
+    ServiceInfoResponse,
+    WhoAmIResponse,
+)
 from asante_secure_multi_agent.cache import InMemoryCacheStore
 from asante_secure_multi_agent.context import AsanteRunContext
 from asante_secure_multi_agent.identity import AuthenticatedHuman, require_authenticated_human
@@ -57,6 +70,54 @@ from asante_secure_multi_agent.tools import (
     SecuredGuestCreditTool,
     SecuredReservationTool,
 )
+
+APP_DESCRIPTION = """
+Asante Secure Multi-Agent is a production-style reference application for **secure
+agentic operations**.
+
+The API demonstrates a complete trust chain:
+
+1. **Human authentication** with OAuth-style Bearer access tokens.
+2. **Workload identity** using trusted SPIFFE IDs for Supervisor and Guest Support.
+3. **Task-bound delegated authority** enforced by Ruhusa.
+4. **MCP over Streamable HTTP** for model-visible business tools.
+5. **Execution fencing and live revalidation** before protected side effects or data disclosure.
+6. **OpenTelemetry** traces and security/reliability metrics.
+7. **Bounded retry + idempotency** for protected credit writes.
+8. **Authorization-aware caching** where every cache hit is preceded by fresh authorization.
+9. **Deterministic release gates** for attack, reliability, and disclosure regressions.
+
+### Security semantics
+
+Ruhusa denials are represented as domain responses such as `status=blocked`; they are not
+HTTP authentication errors. HTTP `401` is reserved for missing, invalid, or expired Bearer
+credentials.
+
+> A cache hit may save an external reservation read, but it may never save the authorization
+> check.
+"""
+
+OPENAPI_TAGS = [
+    {
+        "name": "Service",
+        "description": "Service discovery and liveness endpoints.",
+    },
+    {
+        "name": "Identity",
+        "description": "Inspect the canonical human identity derived from a validated token.",
+    },
+    {
+        "name": "Agents",
+        "description": "Run the authenticated multi-agent workflow through MCP and Ruhusa.",
+    },
+    {
+        "name": "Demo / Diagnostics",
+        "description": (
+            "Direct authenticated control paths for exercising Ruhusa, reliability, and cache "
+            "behavior without relying on model orchestration."
+        ),
+    },
+]
 
 telemetry = configure_telemetry()
 tracer = get_tracer()
@@ -106,21 +167,35 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Asante Secure Multi-Agent Application",
+    summary="Secure agent runtime with delegated authorization, MCP, and Ruhusa.",
+    description=APP_DESCRIPTION,
     version="0.7.0",
+    openapi_tags=OPENAPI_TAGS,
+    contact={
+        "name": "Jamiiz AI Systems",
+        "url": "https://ai.jamiiz.io",
+    },
+    license_info={"name": "Apache-2.0"},
     lifespan=lifespan,
 )
 app.mount("/mcp", mcp_http_app)
 instrument_fastapi(app, telemetry)
 
 
-@app.get("/")
+@app.get(
+    "/",
+    response_model=ServiceInfoResponse,
+    tags=["Service"],
+    summary="Discover service capabilities",
+)
 async def root() -> dict[str, object]:
-    """Return service metadata and discovery links for local development."""
+    """Return versioned service metadata and local API discovery links."""
     return {
         "name": "Asante Secure Multi-Agent Application",
         "phase": 7,
         "status": "running",
         "docs": "/docs",
+        "redoc": "/redoc",
         "health": "/health",
         "whoami": "/auth/whoami",
         "mcp": "/mcp/",
@@ -133,17 +208,32 @@ async def root() -> dict[str, object]:
     }
 
 
-@app.get("/health")
+@app.get(
+    "/health",
+    response_model=HealthResponse,
+    tags=["Service"],
+    summary="Check service liveness",
+)
 def health() -> dict[str, str]:
-    """Liveness probe excluded from tracing to reduce observability noise."""
+    """Return the lightweight liveness probe excluded from tracing noise."""
     return {"status": "ok"}
 
 
-@app.get("/auth/whoami", responses=UNAUTHORIZED_RESPONSE)
+@app.get(
+    "/auth/whoami",
+    response_model=WhoAmIResponse,
+    responses=UNAUTHORIZED_RESPONSE,
+    tags=["Identity"],
+    summary="Inspect the authenticated human principal",
+)
 def whoami(
     operator: AuthenticatedOperator,
 ) -> dict[str, object]:
-    """Show the canonical human identity derived from the validated token."""
+    """Show trusted identity claims after Bearer-token validation.
+
+    The principal used by Ruhusa is derived from the validated `iss` + `sub` claims;
+    callers cannot provide or override it in a request body.
+    """
     return {
         "principal_id": operator.principal_id,
         "subject": operator.subject,
@@ -157,14 +247,22 @@ def whoami(
 
 @app.post(
     "/agent/run",
-    summary="Send a message to the agent graph",
+    response_model=AgentRunResponse,
     responses=AGENT_RUN_RESPONSES,
+    tags=["Agents"],
+    summary="Run the secure multi-agent workflow",
 )
 async def run_agent(
     request: Annotated[RunRequest, Body(openapi_examples=AGENT_RUN_REQUEST_EXAMPLES)],
     operator: AuthenticatedOperator,
 ) -> dict[str, object]:
-    """Run authenticated human -> agents -> MCP -> Ruhusa with one OTel trace."""
+    """Run authenticated human -> agents -> MCP -> Ruhusa in one OTel trace.
+
+    Agent handoff does not create authority. Before the model runs, the application creates
+    task-bound delegation chains rooted in the authenticated human principal. MCP tools then
+    resolve those canonical chains server-side and Ruhusa independently authorizes each
+    protected action.
+    """
     with tracer.start_as_current_span(
         "asante.agent.run",
         attributes={
@@ -211,28 +309,41 @@ async def run_agent(
             "trace_id": current_trace_id(),
             "initiated_by": operator.principal_id,
             "last_agent": result.last_agent.name,
-            "output": result.final_output,
+            "output": str(result.final_output),
         }
 
 
-@app.get("/demo/credits", summary="List issued demo credits", responses=UNAUTHORIZED_RESPONSE)
+@app.get(
+    "/demo/credits",
+    response_model=list[CreditRecord],
+    responses=UNAUTHORIZED_RESPONSE,
+    tags=["Demo / Diagnostics"],
+    summary="Inspect issued demo credits",
+)
 def list_demo_credits(
     _operator: AuthenticatedOperator,
 ) -> list[dict[str, object]]:
-    """Inspect the demo ledger after authenticating the requesting operator."""
+    """Inspect credits that actually reached the protected in-memory side effect."""
     return ledger.credits
 
 
 @app.post(
     "/demo/credits",
-    summary="Issue a credit directly through Ruhusa (no LLM)",
+    response_model=CreditIssuedResponse | CreditBlockedResponse,
     responses=DEMO_CREDIT_RESPONSES,
+    tags=["Demo / Diagnostics"],
+    summary="Issue a credit directly through Ruhusa (no LLM)",
 )
 async def dev_issue_credit(
     request: Annotated[DemoCreditRequest, Body(openapi_examples=DEMO_CREDIT_REQUEST_EXAMPLES)],
     operator: AuthenticatedOperator,
 ) -> dict[str, object]:
-    """Exercise authenticated-human -> Ruhusa directly with OTel visibility."""
+    """Exercise authenticated-human -> Ruhusa without LLM or MCP orchestration.
+
+    This endpoint bypasses model reasoning so authorization, revalidation, idempotency,
+    retry, and side-effect behavior can be diagnosed independently. A blocked Ruhusa
+    decision is returned as a normal domain response and produces no credit side effect.
+    """
     with tracer.start_as_current_span(
         "asante.credit.direct",
         attributes={
@@ -266,8 +377,12 @@ async def dev_issue_credit(
 
 @app.get(
     "/demo/reservations/{reservation_id}",
-    summary="Read a reservation through Ruhusa and the cache (no LLM)",
+    response_model=(
+        ReservationFoundResponse | ReservationNotFoundResponse | ReservationBlockedResponse
+    ),
     responses=DEMO_RESERVATION_RESPONSES,
+    tags=["Demo / Diagnostics"],
+    summary="Read a reservation through Ruhusa and the cache (no LLM)",
 )
 def dev_get_reservation(
     reservation_id: Annotated[
@@ -276,7 +391,13 @@ def dev_get_reservation(
     ],
     operator: AuthenticatedOperator,
 ) -> dict[str, object]:
-    """Exercise the secured reservation-read/cache path without the LLM or MCP."""
+    """Read protected reservation data through Ruhusa and the authorization-aware cache.
+
+    Ruhusa admission and execution-time revalidation happen before every cache lookup.
+    Therefore a cached value cannot be disclosed after the relevant delegated authority is
+    revoked. `not_found` is returned as a successful authorized domain result rather than an
+    HTTP 404 because the security decision succeeded even though the provider had no record.
+    """
     with tracer.start_as_current_span(
         "asante.reservation.direct",
         attributes={

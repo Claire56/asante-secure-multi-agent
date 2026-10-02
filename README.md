@@ -1,19 +1,129 @@
 # Asante Secure Multi-Agent Application
 
-A production-style learning application for secure AI-agent operations at Asante Stays.
+A production-style reference application for **secure agentic operations** at Asante Stays.
+It demonstrates how an LLM can propose actions without becoming the source of identity,
+authority, or execution trust.
 
-The project is deliberately split into layers:
+> **Core principle:** the model proposes; trusted runtime identity and delegation establish
+> authority; Ruhusa independently authorizes; execution is revalidated; telemetry and evals
+> prove what happened.
 
-- **Operator API:** FastAPI.
+## What this project demonstrates
+
 - **Human authentication:** OAuth-style Bearer JWT access tokens.
-- **Agent runtime:** OpenAI Agents SDK.
-- **Agent tool protocol:** MCP over Streamable HTTP.
 - **Workload identity:** trusted SPIFFE IDs for Supervisor and Guest Support.
-- **Authorization boundary:** Ruhusa 0.8.0 for delegated authority, policy, trusted invocation provenance, tool identity, revocation semantics, and execution fencing.
-- **Observability:** OpenTelemetry traces and security/execution metrics, plus an OpenAI Agents tracing bridge.
+- **Delegated authorization:** task-bound, scope-attenuated authority through Ruhusa 0.8.0.
+- **Agent orchestration:** OpenAI Agents SDK Supervisor -> Guest Support handoff.
+- **Agent tool protocol:** MCP over Streamable HTTP with authority hidden from model-visible schemas.
+- **Execution security:** trusted invocation provenance, execution fencing, revocation, and revalidation.
+- **Observability:** OpenTelemetry traces/metrics plus an OpenAI Agents tracing bridge.
 - **Reliability:** bounded known-safe retries, server-derived idempotency, and fail-closed unknown outcomes.
-- **Authorization-aware caching:** reservation reads are cached only after live Ruhusa authorization and execution-time revalidation.
-- **Release gate:** deterministic authorization, attack, reliability, cache-disclosure, and agent-contract evals in GitHub Actions.
+- **Authorization-aware caching:** cached reservation reads never bypass live authorization.
+- **Release safety:** deterministic authorization, attack, reliability, disclosure, and agent-contract evals.
+
+## Architecture
+
+```text
+                         Authenticated Human
+                                |
+                         OAuth Access Token
+                                |
+                                v
+                      Operations Supervisor
+                                |
+                       delegated authority
+                                v
+                       Guest Support Agent
+                                |
+                                v
+                       MCP Tool Boundary
+                         /             \
+                        /               \
+             get_reservation       issue_guest_credit
+                    |                     |
+                    v                     v
+                 Ruhusa                Ruhusa
+              authorization         authorization
+                    |                     |
+              revalidation            revalidation
+                    |                     |
+                    v                     v
+          Authorization-Aware       Idempotency +
+                 Cache              Bounded Retry
+                    |                     |
+                    v                     v
+            Reservation Provider    Credit Provider
+                         \             /
+                          \           /
+                           OpenTelemetry
+                                |
+                       deterministic evals
+                                |
+                           CI release gate
+```
+
+## Security invariants
+
+The project treats these as release properties rather than informal expectations:
+
+1. **Agent handoff is not authority delegation.** A specialist receives only authority explicitly delegated through the trusted chain.
+2. **Model-visible MCP arguments cannot assert identity or grants.** Task, principal, grant, and cache authority stay server-side.
+3. **Ruhusa is checked immediately before protected execution or disclosure.** A stale plan cannot bypass revocation.
+4. **Denied or approval-required credit actions produce zero side effects.**
+5. **Unknown execution outcomes are never blindly retried.**
+6. **A cache hit may save an external read, but it may never save the authorization check.**
+7. **Unauthorized cached-data disclosure is a release-blocking failure.**
+
+## API documentation
+
+When running locally, the application publishes three complementary interfaces:
+
+| Interface | URL | Purpose |
+| --- | --- | --- |
+| Swagger UI | `http://127.0.0.1:8000/docs` | Interactive authenticated testing |
+| ReDoc | `http://127.0.0.1:8000/redoc` | Readable API contract/reference |
+| OpenAPI | `http://127.0.0.1:8000/openapi.json` | Machine-readable API specification |
+
+The operator-facing API is intentionally small:
+
+| Endpoint | Auth | Purpose |
+| --- | --- | --- |
+| `GET /` | No | Service discovery and architecture metadata |
+| `GET /health` | No | Liveness probe |
+| `GET /auth/whoami` | Bearer | Show the canonical authenticated human principal |
+| `POST /agent/run` | Bearer | Run Supervisor -> Guest Support -> MCP -> Ruhusa |
+| `GET /demo/credits` | Bearer | Inspect credits that actually reached the demo side effect |
+| `POST /demo/credits` | Bearer | Exercise the secured credit path without the LLM/MCP layer |
+| `GET /demo/reservations/{reservation_id}` | Bearer | Exercise Ruhusa + authorization-aware cache directly |
+| `/mcp/` | Protocol endpoint | Streamable HTTP MCP transport; not a normal REST resource |
+
+Ruhusa authorization denials are represented as domain outcomes such as `status=blocked`.
+HTTP `401` is reserved for missing, invalid, or expired Bearer credentials.
+
+## Release gate
+
+CI is designed to fail closed. The deterministic gate requires:
+
+```text
+minimum pass rate                = 100%
+maximum critical failures       = 0
+maximum unauthorized side effects = 0
+maximum unauthorized disclosures  = 0
+```
+
+Run the same checks locally:
+
+```bash
+uv run ruff format .
+uv run ruff check .
+uv run pytest
+uv run python -m asante_secure_multi_agent.evals --output eval-report.json
+```
+
+## Development journey
+
+The sections below preserve the implementation history and the security property introduced
+at each phase. The architecture above describes the system as it exists today.
 
 ## Phase 7 vertical slice: authorization-aware caching
 

@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from asante_secure_multi_agent.api_models import ErrorResponse
+
 _PRINCIPAL = "oauth:https://dev.asante.local#claire"
 _TASK_ID = "3f2b9c0e8d7a4b1c9e6f5a4d3c2b1a09"
 _TRACE_ID = "4bf92f3577b34da6a3ce929d0e0e4736"
@@ -37,7 +39,8 @@ def _json_examples(description: str, examples: dict[str, dict[str, Any]]) -> dic
 
 
 UNAUTHORIZED_RESPONSE: dict[int | str, dict[str, Any]] = {
-    401: _json_examples(
+    401: {"model": ErrorResponse}
+    | _json_examples(
         "Missing, malformed, or expired Bearer access token.",
         {
             "missing": {

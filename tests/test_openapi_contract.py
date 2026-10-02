@@ -13,7 +13,7 @@ def test_openapi_has_product_tags_and_description() -> None:
     schema = _schema()
 
     assert schema["info"]["title"] == "Asante Secure Multi-Agent Application"
-    assert schema["info"]["version"] == "0.8.0"
+    assert schema["info"]["version"] == "0.9.0"
     assert "Ruhusa" in schema["info"]["description"]
     description = schema["info"]["description"].lower()
     assert "durable human approval" in description
@@ -86,4 +86,5 @@ def test_service_metadata_documents_product_surfaces() -> None:
     assert "redoc" in response
     assert "mcp" in response
     assert "operations" in response
+    assert "specialists" in response
     assert "human_approval" in response

@@ -17,8 +17,11 @@ from asante_secure_multi_agent.context import AsanteRunContext
 from asante_secure_multi_agent.mcp import TrustedTaskRegistry, build_guest_operations_mcp_server
 from asante_secure_multi_agent.security import (
     build_security_runtime,
-    issue_guest_support_delegation,
-    issue_guest_support_reservation_delegation,
+    issue_guest_support_message_delegation,
+    issue_property_operations_delegation,
+    issue_reservations_delegation,
+    issue_service_recovery_credit_request_delegation,
+    issue_service_recovery_delegation,
 )
 from asante_secure_multi_agent.tools import (
     GuestCreditLedger,
@@ -48,7 +51,7 @@ def _secured_reader(*, ttl: float = 300.0):
         cache_ttl_seconds=ttl,
     )
     task = _task()
-    chain = issue_guest_support_reservation_delegation(security, task)
+    chain = issue_reservations_delegation(security, task)
     return security, cache, provider, tool, task, chain
 
 
@@ -109,7 +112,7 @@ def test_revoked_grant_cannot_disclose_previously_cached_reservation() -> None:
 
     security.authorizer.revoke_grant(
         chain[-1].grant_id,
-        reason="operator withdrew guest-support authority",
+        reason="operator withdrew reservations authority",
     )
 
     blocked = tool.get_reservation(
@@ -190,9 +193,12 @@ def test_mcp_reservation_schema_hides_authority() -> None:
     task = _task("mcp-cache")
     context = AsanteRunContext(
         task=task,
-        guest_support_delegation=issue_guest_support_delegation(security, task),
-        guest_support_reservation_delegation=issue_guest_support_reservation_delegation(
-            security, task
+        reservations_delegation=issue_reservations_delegation(security, task),
+        property_operations_delegation=issue_property_operations_delegation(security, task),
+        guest_support_message_delegation=issue_guest_support_message_delegation(security, task),
+        service_recovery_delegation=issue_service_recovery_delegation(security, task),
+        service_recovery_credit_request_delegation=(
+            issue_service_recovery_credit_request_delegation(security, task)
         ),
     )
     registry = TrustedTaskRegistry()

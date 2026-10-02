@@ -1,10 +1,10 @@
-"""Trusted workload identity abstraction for Asante agents.
+"""Trusted workload identity abstraction for Asante agents and services.
 
-The current Supervisor, Guest Support agent, and MCP server share one process,
-so Phase 4 does not pretend that a network authentication handshake exists.
-Instead, trusted runtime code assigns canonical SPIFFE IDs. When components are
-split into separate workloads, this provider is the seam where SPIRE/SVID
-verification can replace the static implementation without changing Ruhusa.
+Phase 9 assigns a distinct SPIFFE ID to every specialist agent so prompt-level
+roles and authorization identities stay separate. The current agents and MCP
+server still share one process, so trusted runtime code assigns canonical
+identities. When components are split into separate workloads, this provider is
+the seam where SPIRE/SVID verification replaces static assignment.
 """
 
 from __future__ import annotations
@@ -16,6 +16,9 @@ from urllib.parse import urlparse
 
 SUPERVISOR_WORKLOAD = "supervisor"
 GUEST_SUPPORT_WORKLOAD = "guest-support"
+PROPERTY_OPERATIONS_WORKLOAD = "property-operations"
+RESERVATIONS_WORKLOAD = "reservations"
+SERVICE_RECOVERY_WORKLOAD = "service-recovery"
 APPROVAL_EXECUTOR_WORKLOAD = "approval-executor"
 DEFAULT_SPIFFE_TRUST_DOMAIN = "asante.jamiiz.io"
 
@@ -62,6 +65,18 @@ class StaticSpiffeWorkloadIdentityProvider:
             GUEST_SUPPORT_WORKLOAD: WorkloadIdentity(
                 workload=GUEST_SUPPORT_WORKLOAD,
                 principal_id=_spiffe_id(domain, "agents/guest-support"),
+            ),
+            PROPERTY_OPERATIONS_WORKLOAD: WorkloadIdentity(
+                workload=PROPERTY_OPERATIONS_WORKLOAD,
+                principal_id=_spiffe_id(domain, "agents/property-operations"),
+            ),
+            RESERVATIONS_WORKLOAD: WorkloadIdentity(
+                workload=RESERVATIONS_WORKLOAD,
+                principal_id=_spiffe_id(domain, "agents/reservations"),
+            ),
+            SERVICE_RECOVERY_WORKLOAD: WorkloadIdentity(
+                workload=SERVICE_RECOVERY_WORKLOAD,
+                principal_id=_spiffe_id(domain, "agents/service-recovery"),
             ),
             APPROVAL_EXECUTOR_WORKLOAD: WorkloadIdentity(
                 workload=APPROVAL_EXECUTOR_WORKLOAD,

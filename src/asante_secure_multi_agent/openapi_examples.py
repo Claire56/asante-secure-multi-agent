@@ -60,9 +60,11 @@ UNAUTHORIZED_RESPONSE: dict[int | str, dict[str, Any]] = {
 AGENT_RUN_REQUEST_EXAMPLES: dict[str, dict[str, Any]] = {
     "hot_water_recovery": {
         "summary": "Full workflow: maintenance + message + $75 approval",
-        "description": "The Phase 8 product scenario. Expect an open work order, a sent guest "
-        "message, and a PENDING approval, but no credit until a manager approves it via "
-        "POST /operations/approvals/{approval_id}/approve.",
+        "description": (
+            "The Phase 9 least-privilege product scenario. Expect an open work order, "
+            "a sent guest message, and a PENDING approval, but no credit until a manager "
+            "approves it via POST /operations/approvals/{approval_id}/approve."
+        ),
         "value": {
             "message": "Guest R-3001 says there has been no hot water for two hours. Verify "
             "the reservation, create an urgent maintenance request, send the guest an "
@@ -71,7 +73,7 @@ AGENT_RUN_REQUEST_EXAMPLES: dict[str, dict[str, Any]] = {
     },
     "lookup_reservation": {
         "summary": "Look up a reservation (allowed)",
-        "description": "Guest Support reads R-3001 via MCP. Run twice: the second "
+        "description": "Reservations reads R-3001 via MCP. Run twice: the second "
         "read is a cache hit, still authorized live by Ruhusa first.",
         "value": {"message": "What's the status of reservation R-3001?"},
     },
@@ -82,8 +84,8 @@ AGENT_RUN_REQUEST_EXAMPLES: dict[str, dict[str, Any]] = {
     },
     "small_credit": {
         "summary": "Credit $20 (allowed)",
-        "description": "Within the $25 guest-support delegation. Expect "
-        "policy guest-support-small-credit and status 'issued'.",
+        "description": "Within the $25 Service Recovery delegation. Expect "
+        "policy service-recovery-small-credit and status 'issued'.",
         "value": {
             "message": "Issue a $20 service-recovery credit on reservation R-3002 "
             "because the AC was broken."
@@ -121,7 +123,7 @@ AGENT_RUN_RESPONSES: dict[int | str, dict[str, Any]] = {
             "lookup": {
                 "summary": "Reservation found",
                 "value": _envelope(
-                    last_agent="Asante Guest Support Agent",
+                    last_agent="Asante Operations Supervisor",
                     output="Reservation R-3001 for Amina N. at Bandini is confirmed "
                     "(check-in 2026-10-02, check-out 2026-10-05).",
                 ),
@@ -129,7 +131,7 @@ AGENT_RUN_RESPONSES: dict[int | str, dict[str, Any]] = {
             "approval_pending": {
                 "summary": "Credit sent for human approval",
                 "value": _envelope(
-                    last_agent="Asante Guest Support Agent",
+                    last_agent="Asante Operations Supervisor",
                     output="I created urgent work order WO-3F2B9C0E8D, messaged the guest, "
                     "and requested a $75 credit. It is pending manager approval.",
                 ),
@@ -148,7 +150,7 @@ DEMO_CREDIT_REQUEST_EXAMPLES: dict[str, dict[str, Any]] = {
     },
     "at_limit": {
         "summary": "$25 credit (allowed, boundary)",
-        "description": "Exactly at the guest-support limit.",
+        "description": "Exactly at the Service Recovery automatic-credit limit.",
         "value": {"reservation_id": "R-3001", "amount": 25.0, "reason": "Late check-in"},
     },
     "over_delegation": {
@@ -177,7 +179,7 @@ DEMO_CREDIT_RESPONSES: dict[int | str, dict[str, Any]] = {
                     status="issued",
                     deduplicated=False,
                     effect="allow",
-                    policy_id="guest-support-small-credit",
+                    policy_id="service-recovery-small-credit",
                 ),
             },
             "blocked": {
@@ -207,7 +209,7 @@ DEMO_RESERVATION_RESPONSES: dict[int | str, dict[str, Any]] = {
                 "value": _envelope(
                     status="found",
                     effect="allow",
-                    policy_id="guest-support-reservation-read",
+                    policy_id="reservations-read",
                     cache="miss",
                     reservation=_R3001,
                 ),
@@ -217,7 +219,7 @@ DEMO_RESERVATION_RESPONSES: dict[int | str, dict[str, Any]] = {
                 "value": _envelope(
                     status="found",
                     effect="allow",
-                    policy_id="guest-support-reservation-read",
+                    policy_id="reservations-read",
                     cache="hit",
                     reservation=_R3001,
                 ),
@@ -227,7 +229,7 @@ DEMO_RESERVATION_RESPONSES: dict[int | str, dict[str, Any]] = {
                 "value": _envelope(
                     status="not_found",
                     effect="allow",
-                    policy_id="guest-support-reservation-read",
+                    policy_id="reservations-read",
                     cache="miss",
                 ),
             },

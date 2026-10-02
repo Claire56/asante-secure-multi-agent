@@ -1,9 +1,8 @@
-"""Local Ruhusa runtime for secured Asante property operations.
+"""Local Ruhusa runtime for least-privilege Asante property operations.
 
-Phase 8 turns the reference stack into a usable Asante operations slice:
-reservation reads, guest credits, guest messaging, maintenance work orders, and
-human-approved credits all remain behind trusted Ruhusa provenance and
-execution-time revalidation.
+Phase 9 assigns each specialist agent a distinct workload identity and policy
+surface. Agent prompts decide what to attempt; Ruhusa independently decides
+whether that specialist is authorized to perform the requested action.
 """
 
 from __future__ import annotations
@@ -27,18 +26,21 @@ from ruhusa.integrations.trusted import TrustedInvocationFactory
 from asante_secure_multi_agent.identity import (
     APPROVAL_EXECUTOR_WORKLOAD,
     GUEST_SUPPORT_WORKLOAD,
+    PROPERTY_OPERATIONS_WORKLOAD,
+    RESERVATIONS_WORKLOAD,
+    SERVICE_RECOVERY_WORKLOAD,
     StaticSpiffeWorkloadIdentityProvider,
     WorkloadIdentityProvider,
 )
 
 CREDIT_TOOL_ID = "asante.guest-credit"
-CREDIT_TOOL_IMPLEMENTATION = "asante.guest-credit@0.7.0"
+CREDIT_TOOL_IMPLEMENTATION = "asante.guest-credit@0.9.0"
 RESERVATION_TOOL_ID = "asante.reservation-reader"
-RESERVATION_TOOL_IMPLEMENTATION = "asante.reservation-reader@0.7.0"
+RESERVATION_TOOL_IMPLEMENTATION = "asante.reservation-reader@0.9.0"
 GUEST_OPERATIONS_TOOL_ID = "asante.guest-operations"
-GUEST_OPERATIONS_TOOL_IMPLEMENTATION = "asante.guest-operations@0.8.0"
+GUEST_OPERATIONS_TOOL_IMPLEMENTATION = "asante.guest-operations@0.9.0"
 APPROVED_CREDIT_TOOL_ID = "asante.approved-credit"
-APPROVED_CREDIT_TOOL_IMPLEMENTATION = "asante.approved-credit@0.8.0"
+APPROVED_CREDIT_TOOL_IMPLEMENTATION = "asante.approved-credit@0.9.0"
 
 
 @dataclass(frozen=True)
@@ -95,9 +97,12 @@ def _verified_approved_credit(limit: float):
 def build_security_runtime(
     workload_identities: WorkloadIdentityProvider | None = None,
 ) -> AsanteSecurityRuntime:
-    """Build the local security boundary for Asante property operations."""
+    """Build the local least-privilege security boundary for Asante operations."""
     identity_provider = workload_identities or StaticSpiffeWorkloadIdentityProvider()
+    reservations_id = identity_provider.require(RESERVATIONS_WORKLOAD).principal_id
+    property_operations_id = identity_provider.require(PROPERTY_OPERATIONS_WORKLOAD).principal_id
     guest_support_id = identity_provider.require(GUEST_SUPPORT_WORKLOAD).principal_id
+    service_recovery_id = identity_provider.require(SERVICE_RECOVERY_WORKLOAD).principal_id
     approval_executor_id = identity_provider.require(APPROVAL_EXECUTOR_WORKLOAD).principal_id
 
     grant_store = InMemoryGrantStore()
@@ -137,20 +142,20 @@ def build_security_runtime(
     policies = StaticPolicyStore(
         rules=(
             PolicyRule(
-                policy_id="guest-support-reservation-read",
+                policy_id="reservations-read",
                 effect=DecisionEffect.ALLOW,
                 actions=frozenset({"reservation.read"}),
-                principal_ids=frozenset({guest_support_id}),
+                principal_ids=frozenset({reservations_id}),
                 resource_prefixes=("reservation:",),
-                reason="guest support may read reservations within delegated scope",
+                reason="reservations specialist may read reservations within delegated scope",
             ),
             PolicyRule(
-                policy_id="guest-support-maintenance-create",
+                policy_id="property-operations-maintenance-create",
                 effect=DecisionEffect.ALLOW,
                 actions=frozenset({"maintenance.create"}),
-                principal_ids=frozenset({guest_support_id}),
+                principal_ids=frozenset({property_operations_id}),
                 resource_prefixes=("reservation:",),
-                reason="guest support may create maintenance work orders",
+                reason="property operations may create maintenance work orders",
             ),
             PolicyRule(
                 policy_id="guest-support-message-send",
@@ -161,28 +166,30 @@ def build_security_runtime(
                 reason="guest support may send operational guest updates",
             ),
             PolicyRule(
-                policy_id="guest-support-credit-request",
+                policy_id="service-recovery-credit-request",
                 effect=DecisionEffect.ALLOW,
                 actions=frozenset({"guest.credit.request"}),
-                principal_ids=frozenset({guest_support_id}),
+                principal_ids=frozenset({service_recovery_id}),
                 resource_prefixes=("reservation:",),
                 condition=_credit_request_between(25.0, 100.0),
-                reason="guest support may request human approval for credits above $25 up to $100",
+                reason=(
+                    "service recovery may request human approval for credits above $25 up to $100"
+                ),
             ),
             PolicyRule(
-                policy_id="guest-support-small-credit",
+                policy_id="service-recovery-small-credit",
                 effect=DecisionEffect.ALLOW,
                 actions=frozenset({"guest.credit.issue"}),
-                principal_ids=frozenset({guest_support_id}),
+                principal_ids=frozenset({service_recovery_id}),
                 resource_prefixes=("reservation:",),
                 condition=_credit_at_most(25.0),
-                reason="guest support may issue service-recovery credit up to $25",
+                reason="service recovery may issue automatic service credit up to $25",
             ),
             PolicyRule(
-                policy_id="guest-support-credit-needs-approval",
+                policy_id="service-recovery-credit-needs-approval",
                 effect=DecisionEffect.REQUIRE_APPROVAL,
                 actions=frozenset({"guest.credit.issue"}),
-                principal_ids=frozenset({guest_support_id}),
+                principal_ids=frozenset({service_recovery_id}),
                 resource_prefixes=("reservation:",),
                 condition=_credit_at_most(100.0),
                 reason="credits above $25 and up to $100 require human approval",

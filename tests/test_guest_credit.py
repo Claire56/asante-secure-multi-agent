@@ -10,12 +10,12 @@ from uuid import uuid4
 from ruhusa import DelegationGrant, Scope, TaskContext
 
 from asante_secure_multi_agent.identity import (
-    GUEST_SUPPORT_WORKLOAD,
+    SERVICE_RECOVERY_WORKLOAD,
     SUPERVISOR_WORKLOAD,
 )
 from asante_secure_multi_agent.security import (
     build_security_runtime,
-    issue_guest_support_delegation,
+    issue_service_recovery_delegation,
 )
 from asante_secure_multi_agent.tools import GuestCreditLedger, SecuredGuestCreditTool
 
@@ -44,18 +44,20 @@ def test_delegation_chain_is_task_bound_registered_and_narrowed() -> None:
     security = build_security_runtime()
     task = _task()
 
-    root, child = issue_guest_support_delegation(security, task)
+    root, child = issue_service_recovery_delegation(security, task)
 
     assert root.grantor_id == task.initiated_by
     supervisor_id = security.workload_identities.require(SUPERVISOR_WORKLOAD).principal_id
-    guest_support_id = security.workload_identities.require(GUEST_SUPPORT_WORKLOAD).principal_id
+    service_recovery_id = security.workload_identities.require(
+        SERVICE_RECOVERY_WORKLOAD
+    ).principal_id
 
     assert root.grantee_id == supervisor_id
     assert root.task_id == task.task_id
     assert root.scope.max_numeric_arguments["amount"] == 100.0
 
     assert child.grantor_id == supervisor_id
-    assert child.grantee_id == guest_support_id
+    assert child.grantee_id == service_recovery_id
     assert child.task_id == task.task_id
     assert child.scope.max_numeric_arguments["amount"] == 25.0
 
@@ -69,7 +71,7 @@ def test_guest_support_can_issue_small_credit_with_delegated_authority() -> None
     ledger = GuestCreditLedger()
     tool = SecuredGuestCreditTool(security, ledger)
     task = _task()
-    chain = issue_guest_support_delegation(security, task)
+    chain = issue_service_recovery_delegation(security, task)
 
     result = tool.issue_credit(
         reservation_id="R-1001",
@@ -81,7 +83,7 @@ def test_guest_support_can_issue_small_credit_with_delegated_authority() -> None
 
     assert result["status"] == "issued"
     assert result["effect"] == "allow"
-    assert result["policy_id"] == "guest-support-small-credit"
+    assert result["policy_id"] == "service-recovery-small-credit"
     assert len(ledger.credits) == 1
 
 
@@ -91,7 +93,7 @@ def test_default_delegation_blocks_credit_above_guest_support_limit() -> None:
     ledger = GuestCreditLedger()
     tool = SecuredGuestCreditTool(security, ledger)
     task = _task()
-    chain = issue_guest_support_delegation(security, task)
+    chain = issue_service_recovery_delegation(security, task)
 
     result = tool.issue_credit(
         reservation_id="R-1001",
@@ -112,11 +114,11 @@ def test_broader_trusted_delegation_still_requires_policy_approval() -> None:
     ledger = GuestCreditLedger()
     tool = SecuredGuestCreditTool(security, ledger)
     task = _task()
-    chain = issue_guest_support_delegation(
+    chain = issue_service_recovery_delegation(
         security,
         task,
         supervisor_limit=100.0,
-        guest_support_limit=100.0,
+        service_recovery_limit=100.0,
     )
 
     result = tool.issue_credit(
@@ -138,11 +140,11 @@ def test_credit_above_policy_ceiling_is_default_deny() -> None:
     ledger = GuestCreditLedger()
     tool = SecuredGuestCreditTool(security, ledger)
     task = _task()
-    chain = issue_guest_support_delegation(
+    chain = issue_service_recovery_delegation(
         security,
         task,
         supervisor_limit=200.0,
-        guest_support_limit=200.0,
+        service_recovery_limit=200.0,
     )
 
     result = tool.issue_credit(
@@ -186,7 +188,7 @@ def test_widened_child_grant_is_denied_even_for_small_action() -> None:
     widened_child = DelegationGrant(
         grant_id=f"grant:{uuid4().hex}",
         grantor_id=security.workload_identities.require(SUPERVISOR_WORKLOAD).principal_id,
-        grantee_id=security.workload_identities.require(GUEST_SUPPORT_WORKLOAD).principal_id,
+        grantee_id=security.workload_identities.require(SERVICE_RECOVERY_WORKLOAD).principal_id,
         task_id=task.task_id,
         scope=_credit_scope(50.0),
         issued_at=now,

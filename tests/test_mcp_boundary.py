@@ -1,4 +1,4 @@
-"""MCP trust-boundary regressions preserved through Phase 4."""
+"""MCP trust-boundary regressions preserved through Phase 9."""
 
 from __future__ import annotations
 
@@ -11,8 +11,10 @@ import pytest
 from ruhusa import TaskContext
 
 from asante_secure_multi_agent.context import AsanteRunContext
+from asante_secure_multi_agent.identity import GUEST_SUPPORT_WORKLOAD
 from asante_secure_multi_agent.mcp import (
     ASANTE_TASK_META_KEY,
+    ASANTE_WORKLOAD_META_KEY,
     TrustedTaskNotFoundError,
     TrustedTaskRegistry,
     build_guest_operations_mcp_server,
@@ -21,7 +23,11 @@ from asante_secure_multi_agent.mcp import (
 )
 from asante_secure_multi_agent.security import (
     build_security_runtime,
-    issue_guest_support_delegation,
+    issue_guest_support_message_delegation,
+    issue_property_operations_delegation,
+    issue_reservations_delegation,
+    issue_service_recovery_credit_request_delegation,
+    issue_service_recovery_delegation,
 )
 from asante_secure_multi_agent.tools import GuestCreditLedger, SecuredGuestCreditTool
 
@@ -39,7 +45,13 @@ def _trusted_context() -> tuple[AsanteRunContext, SecuredGuestCreditTool, GuestC
     )
     context = AsanteRunContext(
         task=task,
-        guest_support_delegation=issue_guest_support_delegation(security, task),
+        reservations_delegation=issue_reservations_delegation(security, task),
+        property_operations_delegation=issue_property_operations_delegation(security, task),
+        guest_support_message_delegation=issue_guest_support_message_delegation(security, task),
+        service_recovery_delegation=issue_service_recovery_delegation(security, task),
+        service_recovery_credit_request_delegation=(
+            issue_service_recovery_credit_request_delegation(security, task)
+        ),
     )
     return context, credit_tool, ledger
 
@@ -69,7 +81,9 @@ def test_mcp_meta_resolver_injects_task_reference_outside_tool_arguments() -> No
 
     meta = resolve_asante_mcp_meta(fake_meta_context)
 
-    assert meta == {ASANTE_TASK_META_KEY: context.task.task_id}
+    assert meta is not None
+    assert meta[ASANTE_TASK_META_KEY] == context.task.task_id
+    assert meta[ASANTE_WORKLOAD_META_KEY] == GUEST_SUPPORT_WORKLOAD
 
 
 def test_mcp_tool_schema_does_not_expose_task_or_grant_authority_to_model() -> None:
@@ -110,7 +124,7 @@ def test_mcp_boundary_executes_using_server_side_canonical_authority() -> None:
 
 
 def test_mcp_boundary_preserves_delegation_limit() -> None:
-    """Moving the action behind MCP cannot expand Guest Support authority."""
+    """Moving the action behind MCP cannot expand Service Recovery authority."""
     context, credit_tool, ledger = _trusted_context()
     registry = TrustedTaskRegistry()
     registry.register(context)

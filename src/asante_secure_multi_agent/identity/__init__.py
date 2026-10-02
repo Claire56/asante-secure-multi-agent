@@ -9,6 +9,9 @@ from .human import (
 from .workload import (
     APPROVAL_EXECUTOR_WORKLOAD,
     GUEST_SUPPORT_WORKLOAD,
+    PROPERTY_OPERATIONS_WORKLOAD,
+    RESERVATIONS_WORKLOAD,
+    SERVICE_RECOVERY_WORKLOAD,
     SUPERVISOR_WORKLOAD,
     StaticSpiffeWorkloadIdentityProvider,
     WorkloadIdentity,
@@ -18,6 +21,9 @@ from .workload import (
 __all__ = [
     "APPROVAL_EXECUTOR_WORKLOAD",
     "GUEST_SUPPORT_WORKLOAD",
+    "PROPERTY_OPERATIONS_WORKLOAD",
+    "RESERVATIONS_WORKLOAD",
+    "SERVICE_RECOVERY_WORKLOAD",
     "SUPERVISOR_WORKLOAD",
     "AuthenticatedHuman",
     "DevHmacAccessTokenVerifier",

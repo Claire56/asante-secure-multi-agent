@@ -47,6 +47,11 @@ _cache_denied_before_lookup = _meter.create_counter(
     unit="1",
     description="Reservation reads denied before sensitive cache access.",
 )
+_operation_executions = _meter.create_counter(
+    "asante.operations.executions",
+    unit="1",
+    description="Guest operations such as maintenance, messaging, and approval requests.",
+)
 
 
 def monotonic_time() -> float:
@@ -132,4 +137,15 @@ def record_credit_deduplication() -> None:
     _credit_deduplications.add(
         1,
         {"asante.action": "guest.credit.issue"},
+    )
+
+
+def record_operation_execution(*, action: str, outcome: str) -> None:
+    """Record one protected guest-operation outcome."""
+    _operation_executions.add(
+        1,
+        {
+            "asante.action": action,
+            "asante.outcome": outcome,
+        },
     )

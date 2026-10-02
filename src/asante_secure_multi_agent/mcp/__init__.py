@@ -9,8 +9,11 @@ from .client import (
 from .registry import TrustedTaskNotFoundError, TrustedTaskRegistry
 from .server import (
     build_guest_operations_mcp_server,
+    create_maintenance_for_trusted_task,
     get_reservation_for_trusted_task,
     issue_guest_credit_for_trusted_task,
+    request_guest_credit_for_trusted_task,
+    send_guest_message_for_trusted_task,
 )
 
 __all__ = [
@@ -20,7 +23,10 @@ __all__ = [
     "TrustedTaskRegistry",
     "build_guest_operations_mcp_client",
     "build_guest_operations_mcp_server",
+    "create_maintenance_for_trusted_task",
     "get_reservation_for_trusted_task",
     "issue_guest_credit_for_trusted_task",
+    "request_guest_credit_for_trusted_task",
     "resolve_asante_mcp_meta",
+    "send_guest_message_for_trusted_task",
 ]

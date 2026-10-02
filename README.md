@@ -20,6 +20,7 @@ authority, or execution trust.
 - **Reliability:** bounded known-safe retries, server-derived idempotency, and fail-closed unknown outcomes.
 - **Authorization-aware caching:** cached reservation reads never bypass live authorization.
 - **Release safety:** deterministic authorization, attack, reliability, disclosure, and agent-contract evals.
+- **Property operations:** maintenance work orders, guest messaging, and durable human approval for larger service-recovery credits.
 
 ## Architecture
 
@@ -95,10 +96,17 @@ The operator-facing API is intentionally small:
 | `GET /demo/credits` | Bearer | Inspect credits that actually reached the demo side effect |
 | `POST /demo/credits` | Bearer | Exercise the secured credit path without the LLM/MCP layer |
 | `GET /demo/reservations/{reservation_id}` | Bearer | Exercise Ruhusa + authorization-aware cache directly |
+| `GET /operations/work-orders` | Bearer | Maintenance work orders created by the agent |
+| `GET /operations/messages` | Bearer | Outbound guest messages sent by the agent |
+| `GET /operations/approvals` | Bearer | Durable human approval inbox |
+| `POST /operations/approvals/{approval_id}/approve` | Bearer + `asante:approve` | Approve and execute a pending credit |
+| `POST /operations/approvals/{approval_id}/deny` | Bearer + `asante:approve` | Deny a pending credit; nothing executes |
 | `/mcp/` | Protocol endpoint | Streamable HTTP MCP transport; not a normal REST resource |
 
 Ruhusa authorization denials are represented as domain outcomes such as `status=blocked`.
-HTTP `401` is reserved for missing, invalid, or expired Bearer credentials.
+HTTP `401` is reserved for missing, invalid, or expired Bearer credentials. The approval
+endpoints additionally return `403` without `asante:approve`, `404` for an unknown approval,
+and `409` for an invalid state transition.
 
 ## Release gate
 
@@ -124,6 +132,77 @@ uv run python -m asante_secure_multi_agent.evals --output eval-report.json
 
 The sections below preserve the implementation history and the security property introduced
 at each phase. The architecture above describes the system as it exists today.
+
+## Phase 8 product slice: property operations + human approval
+
+Phase 8 moves the project from a secure-agent reference flow toward the real
+Asante Stays operating backend. Guest Support can now verify a reservation, create
+a maintenance work order, send an operational guest update, issue a small service
+credit, or request durable human approval for a larger credit.
+
+```text
+Guest / operator issue
+  -> Operations Supervisor
+  -> Guest Support
+  -> get_reservation
+  -> create_maintenance_request
+  -> send_guest_message
+  -> service recovery
+       -> <= $25: issue_guest_credit
+       -> $25-$100: request_guest_credit -> human approval inbox
+       -> > $100: deny / escalate
+```
+
+The approval path deliberately separates **authority to request** a credit from
+**authority to execute** it. The model can create a pending approval request but
+cannot mark it approved or invoke the approved-credit executor.
+
+Approval and denial endpoints additionally require the validated human token to
+contain the `asante:approve` scope, so the operator who requests work does not
+automatically gain manager approval authority.
+
+```text
+Agent
+  -> MCP request_guest_credit
+  -> Ruhusa guest.credit.request
+  -> SQLite approval record (pending)
+
+Authenticated human
+  -> POST /operations/approvals/{id}/approve
+  -> durable approval decision
+  -> trusted approval-executor workload
+  -> Ruhusa guest.credit.issue.approved
+  -> idempotent credit provider write
+```
+
+A denial never executes the credit. Repeating an approved execution is
+idempotent, and the approval record survives process restarts when the configured
+SQLite path is persistent.
+
+### Operations dashboard endpoints
+
+```text
+GET  /operations/work-orders
+GET  /operations/messages
+GET  /operations/approvals
+POST /operations/approvals/{approval_id}/approve
+POST /operations/approvals/{approval_id}/deny
+```
+
+For local development, approval state defaults to `.asante/approvals.db` and can
+be moved with `ASANTE_APPROVAL_DB_PATH`. Maintenance and message providers remain
+in memory until the production-backend roadmap item.
+
+### New MCP tools
+
+```text
+create_maintenance_request(reservation_id, category, urgency, description)
+send_guest_message(reservation_id, message)
+request_guest_credit(reservation_id, amount, reason)
+```
+
+As with the earlier MCP boundary, task IDs, principals, delegation chains, grant
+IDs, and approval-verification flags are never model-visible tool arguments.
 
 ## Phase 7 vertical slice: authorization-aware caching
 
@@ -410,6 +489,15 @@ TOKEN=$(uv run python -m asante_secure_multi_agent.identity.dev_token claire)
 printf '%s\n' "$TOKEN"
 ```
 
+For the human approval endpoints, create a manager token with explicit approval
+authority (in the same terminal, after loading `.env`):
+
+```bash
+MANAGER_TOKEN=$(uv run python -m asante_secure_multi_agent.identity.dev_token manager \
+  --scope "asante:operate asante:approve")
+printf '%s\n' "$MANAGER_TOKEN"
+```
+
 The API and token generator must use the same `ASANTE_DEV_JWT_SECRET`, issuer,
 and audience. The token command does not load `.env` automatically. Development
 tokens expire after 30 minutes, so generate a new one after expiration.
@@ -447,9 +535,27 @@ Use this example to confirm that delegated authority is enforced:
 }
 ```
 
-The `$20` credit should be issued. The `$40` credit should be blocked by the
-Guest Support agent's `$25` delegated limit. A successful agent response also
-includes the Ruhusa task ID and an OpenTelemetry trace ID.
+The `$20` credit should be issued. The `$40` credit is above the Guest Support
+agent's `$25` direct limit, so the agent should request human approval instead:
+`GET /operations/approvals` shows a `pending` request and no credit is issued.
+A successful agent response also includes the Ruhusa task ID and an
+OpenTelemetry trace ID.
+
+To test the full Phase 8 workflow, send:
+
+```json
+{
+  "message": "Guest R-3001 says there has been no hot water for two hours. Verify the reservation, create an urgent maintenance request, send the guest an update, and request a $75 service-recovery credit."
+}
+```
+
+Then check `GET /operations/work-orders`, `GET /operations/messages`, and
+`GET /operations/approvals`: you should see an open work order, a sent message,
+and a pending `$75` approval, but no `$75` entry in `GET /demo/credits`.
+Re-authorize with `MANAGER_TOKEN` and call
+`POST /operations/approvals/{approval_id}/approve` with
+`{"note": "Approved after reviewing the outage duration."}`. Only then does the
+credit appear in `GET /demo/credits`.
 
 To test authorization without making an OpenAI request, use
 `POST /demo/credits` with:
@@ -469,7 +575,8 @@ To test authorization-aware caching, call
 The normal learning cases remain:
 
 - `$20` credit -> allowed and executed;
-- `$40` credit -> blocked by the `$25` Guest Support delegation;
+- `$40` credit -> above the `$25` direct limit, so it becomes a pending approval request;
+- `$150` credit -> above the `$100` approval ceiling, so it is denied outright;
 - `/demo/credits` -> direct authenticated Ruhusa diagnostic path.
 
 ## Phase 5 tests
@@ -491,7 +598,7 @@ adds tests for:
 5. ~~Add OpenTelemetry traces and security metrics.~~
 6. ~~Add agent evals and authorization attack tests to CI.~~
 7. ~~Add authorization-aware caching with revocation-safe reads.~~
-8. Add durable human approval workflow.
+8. ~~Add durable human approval workflow plus maintenance and guest messaging.~~
 9. Replace in-memory stores with production backends/shared task state.
 10. Replace the in-memory cache with Redis while preserving the same authorization-before-cache invariant.
 11. Split MCP/agent workloads and replace static SPIFFE assignment with SPIRE/SVID verification.

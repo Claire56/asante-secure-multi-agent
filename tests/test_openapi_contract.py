@@ -9,16 +9,24 @@ def _schema() -> dict[str, object]:
     return app.openapi()
 
 
-def test_openapi_has_intentional_tags_and_description() -> None:
+def test_openapi_has_product_tags_and_description() -> None:
     schema = _schema()
 
     assert schema["info"]["title"] == "Asante Secure Multi-Agent Application"
-    assert schema["info"]["version"] == "0.7.0"
+    assert schema["info"]["version"] == "0.8.0"
     assert "Ruhusa" in schema["info"]["description"]
-    assert "authorization-aware caching" in schema["info"]["description"].lower()
+    description = schema["info"]["description"].lower()
+    assert "durable human approval" in description
+    assert "authorization-aware caching" in description
 
     tags = {item["name"] for item in schema["tags"]}
-    assert tags == {"Service", "Identity", "Agents", "Demo / Diagnostics"}
+    assert tags == {
+        "Service",
+        "Identity",
+        "Agents",
+        "Operations",
+        "Demo / Diagnostics",
+    }
 
 
 def test_bearer_security_scheme_is_documented() -> None:
@@ -53,15 +61,29 @@ def test_reservation_docs_expose_domain_outcomes_without_authority_fields() -> N
 
     run_request = schema["components"]["schemas"]["RunRequest"]["properties"]
     demo_credit = schema["components"]["schemas"]["DemoCreditRequest"]["properties"]
-    assert "operator_id" not in run_request
     assert "operator_id" not in demo_credit
+    assert "operator_id" not in run_request
     assert "principal_id" not in run_request
     assert "grant_id" not in run_request
 
 
-def test_service_metadata_documents_redoc_discovery() -> None:
+def test_operations_approval_contract_documents_separation_of_duties() -> None:
+    schema = _schema()
+    approve = schema["paths"]["/operations/approvals/{approval_id}/approve"]["post"]
+
+    success = approve["responses"]["200"]["content"]["application/json"]["schema"]
+    assert success["$ref"].endswith("/ApprovalExecutionResponse")
+    assert "403" in approve["responses"]
+    assert "404" in approve["responses"]
+    assert "409" in approve["responses"]
+    assert approve["tags"] == ["Operations"]
+
+
+def test_service_metadata_documents_product_surfaces() -> None:
     response = _schema()["components"]["schemas"]["ServiceInfoResponse"]["properties"]
 
     assert "docs" in response
     assert "redoc" in response
     assert "mcp" in response
+    assert "operations" in response
+    assert "human_approval" in response

@@ -1,9 +1,9 @@
-"""Deterministic security/reliability/cache eval gate for Phase 7.
+"""Deterministic security/reliability/product eval gate for Phase 8.
 
 The CI gate intentionally avoids a live model call. It evaluates the invariant
 layer that must never become probabilistic: authorization, delegated authority,
-MCP authority hiding, idempotency, bounded retries, cache-disclosure safety, and
-agent safety contracts.
+MCP authority hiding, idempotency, bounded retries, cache-disclosure safety,
+durable approval, property-operation side effects, and agent safety contracts.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from asante_secure_multi_agent.agents import (
     GUEST_SUPPORT_INSTRUCTIONS,
     SUPERVISOR_INSTRUCTIONS,
 )
+from asante_secure_multi_agent.approvals import SQLiteApprovalStore
 from asante_secure_multi_agent.cache import InMemoryCacheStore, build_reservation_cache_key
 from asante_secure_multi_agent.context import AsanteRunContext
 from asante_secure_multi_agent.identity import GUEST_SUPPORT_WORKLOAD, SUPERVISOR_WORKLOAD
@@ -35,13 +36,20 @@ from asante_secure_multi_agent.reliability import (
 )
 from asante_secure_multi_agent.security import (
     build_security_runtime,
+    issue_approval_executor_delegation,
+    issue_guest_support_credit_request_delegation,
     issue_guest_support_delegation,
     issue_guest_support_reservation_delegation,
+    issue_guest_support_service_delegation,
 )
 from asante_secure_multi_agent.tools import (
+    ApprovedCreditExecutor,
     GuestCreditLedger,
+    GuestMessageOutbox,
     InMemoryReservationProvider,
+    MaintenanceWorkOrderStore,
     SecuredGuestCreditTool,
+    SecuredGuestOperationsTool,
     SecuredReservationTool,
 )
 
@@ -684,6 +692,216 @@ def _eval_mcp_reservation_schema_hides_authority() -> EvalResult:
     )
 
 
+def _operations_fixture():
+    security = build_security_runtime()
+    approvals = SQLiteApprovalStore(":memory:")
+    maintenance = MaintenanceWorkOrderStore()
+    messages = GuestMessageOutbox()
+    operations_tool = SecuredGuestOperationsTool(
+        security,
+        maintenance,
+        messages,
+        approvals,
+    )
+    return security, approvals, maintenance, messages, operations_tool
+
+
+def _eval_maintenance_and_guest_message_execute() -> EvalResult:
+    security, approvals, maintenance, messages, operations_tool = _operations_fixture()
+    task = _task("eval-property-ops")
+    chain = issue_guest_support_service_delegation(security, task)
+    work_order = operations_tool.create_maintenance_request(
+        reservation_id="R-3001",
+        category="plumbing",
+        urgency="high",
+        description="No hot water for two hours",
+        task=task,
+        delegation_chain=chain,
+    )
+    message = operations_tool.send_guest_message(
+        reservation_id="R-3001",
+        message="We created an urgent maintenance request and will update you shortly.",
+        task=task,
+        delegation_chain=chain,
+    )
+    passed = (
+        work_order.get("status") == "open"
+        and message.get("status") == "sent"
+        and len(maintenance.work_orders) == 1
+        and len(messages.messages) == 1
+    )
+    approvals.close()
+    return _result(
+        "maintenance_and_guest_message_execute",
+        "product_workflow",
+        passed,
+        critical=False,
+        details=(f"work_orders={len(maintenance.work_orders)} messages={len(messages.messages)}"),
+    )
+
+
+def _eval_credit_approval_request_has_no_credit_side_effect() -> EvalResult:
+    security, approvals, _, _, operations_tool = _operations_fixture()
+    ledger = GuestCreditLedger()
+    task = _task("eval-credit-approval-request")
+    result = operations_tool.request_guest_credit(
+        reservation_id="R-3001",
+        amount=75.0,
+        reason="Extended outage",
+        task=task,
+        delegation_chain=issue_guest_support_credit_request_delegation(security, task),
+    )
+    pending = approvals.list_requests(status="pending")
+    unauthorized = bool(ledger.credits)
+    passed = result.get("status") == "approval_pending" and len(pending) == 1 and not unauthorized
+    approvals.close()
+    return _result(
+        "credit_approval_request_has_no_credit_side_effect",
+        "human_approval",
+        passed,
+        critical=True,
+        unauthorized_side_effect=unauthorized,
+        details=f"pending={len(pending)} credit_side_effects={len(ledger.credits)}",
+    )
+
+
+def _eval_human_approved_credit_executes_once() -> EvalResult:
+    security, approvals, _, _, operations_tool = _operations_fixture()
+    ledger = GuestCreditLedger()
+    executor = ApprovedCreditExecutor(security, ledger, approvals)
+    request_task = _task("eval-human-approval")
+    requested = operations_tool.request_guest_credit(
+        reservation_id="R-3001",
+        amount=75.0,
+        reason="Extended outage",
+        task=request_task,
+        delegation_chain=issue_guest_support_credit_request_delegation(security, request_task),
+    )
+    approval_id = str(requested.get("approval_id"))
+    approved = approvals.decide(
+        approval_id,
+        approved=True,
+        decided_by="oauth:https://dev.asante.local#manager",
+    )
+    execution_task = TaskContext(
+        task_id=f"eval-approved-exec-{uuid4().hex}",
+        initiated_by="oauth:https://dev.asante.local#manager",
+        purpose="execute approved credit",
+        expires_at=datetime.now(UTC) + timedelta(minutes=10),
+    )
+    first = executor.execute(
+        approval=approved,
+        task=execution_task,
+        delegation_chain=issue_approval_executor_delegation(security, execution_task),
+    )
+    second = executor.execute(
+        approval=approvals.require(approval_id),
+        task=execution_task,
+        delegation_chain=issue_approval_executor_delegation(security, execution_task),
+    )
+    passed = (
+        first.get("status") == "issued"
+        and bool(second.get("deduplicated"))
+        and len(ledger.credits) == 1
+        and approvals.require(approval_id).status == "executed"
+    )
+    side_effect_violation = len(ledger.credits) != 1
+    approvals.close()
+    return _result(
+        "human_approved_credit_executes_once",
+        "human_approval",
+        passed,
+        critical=True,
+        unauthorized_side_effect=side_effect_violation,
+        details=(f"credits={len(ledger.credits)} second_deduplicated={second.get('deduplicated')}"),
+    )
+
+
+def _eval_human_denial_never_executes_credit() -> EvalResult:
+    security, approvals, _, _, operations_tool = _operations_fixture()
+    ledger = GuestCreditLedger()
+    executor = ApprovedCreditExecutor(security, ledger, approvals)
+    request_task = _task("eval-human-denial")
+    requested = operations_tool.request_guest_credit(
+        reservation_id="R-3001",
+        amount=60.0,
+        reason="Service complaint",
+        task=request_task,
+        delegation_chain=issue_guest_support_credit_request_delegation(security, request_task),
+    )
+    denied = approvals.decide(
+        str(requested.get("approval_id")),
+        approved=False,
+        decided_by="oauth:https://dev.asante.local#manager",
+    )
+    execution_task = _task("eval-denied-exec")
+    result = executor.execute(
+        approval=denied,
+        task=execution_task,
+        delegation_chain=issue_approval_executor_delegation(security, execution_task),
+    )
+    unauthorized = bool(ledger.credits)
+    passed = result.get("status") == "blocked" and not unauthorized
+    approvals.close()
+    return _result(
+        "human_denial_never_executes_credit",
+        "human_approval",
+        passed,
+        critical=True,
+        unauthorized_side_effect=unauthorized,
+        details=f"status={result.get('status')} credits={len(ledger.credits)}",
+    )
+
+
+def _eval_mcp_product_schemas_hide_authority() -> EvalResult:
+    security, approvals, _, _, operations_tool = _operations_fixture()
+    ledger = GuestCreditLedger()
+    task = _task("eval-mcp-product-schema")
+    context = AsanteRunContext(
+        task=task,
+        guest_support_delegation=issue_guest_support_delegation(security, task),
+        guest_support_reservation_delegation=issue_guest_support_reservation_delegation(
+            security, task
+        ),
+        guest_support_service_delegation=issue_guest_support_service_delegation(security, task),
+        guest_support_credit_request_delegation=(
+            issue_guest_support_credit_request_delegation(security, task)
+        ),
+    )
+    registry = TrustedTaskRegistry()
+    registry.register(context)
+    server = build_guest_operations_mcp_server(
+        SecuredGuestCreditTool(security, ledger),
+        registry,
+        operations_tool=operations_tool,
+    )
+    tools = asyncio.run(server.list_tools())
+    schemas = {tool.name: set(tool.input_schema.get("properties", {})) for tool in tools}
+    forbidden = {
+        "task_id",
+        "delegation_chain",
+        "principal_id",
+        "grant_id",
+        "approval_verified",
+    }
+    product_tools = {
+        "create_maintenance_request",
+        "send_guest_message",
+        "request_guest_credit",
+    }
+    passed = product_tools <= schemas.keys() and all(
+        not schemas[name] & forbidden for name in product_tools
+    )
+    approvals.close()
+    return _result(
+        "mcp_product_schemas_hide_authority",
+        "attack",
+        passed,
+        critical=True,
+        details=str({name: sorted(schemas.get(name, set())) for name in sorted(product_tools)}),
+    )
+
+
 def _eval_agent_safety_instruction_contract() -> EvalResult:
     guest_contract = (
         "Never claim a credit was issued unless" in GUEST_SUPPORT_INSTRUCTIONS
@@ -725,6 +943,11 @@ def run_release_evals(
         _eval_cross_task_replay_cannot_read_cache,
         _eval_cache_schema_version_changes_key,
         _eval_mcp_reservation_schema_hides_authority,
+        _eval_maintenance_and_guest_message_execute,
+        _eval_credit_approval_request_has_no_credit_side_effect,
+        _eval_human_approved_credit_executes_once,
+        _eval_human_denial_never_executes_credit,
+        _eval_mcp_product_schemas_hide_authority,
         _eval_agent_safety_instruction_contract,
     )
     results = tuple(evaluator() for evaluator in evaluators)

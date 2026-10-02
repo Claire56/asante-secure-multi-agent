@@ -58,6 +58,17 @@ UNAUTHORIZED_RESPONSE: dict[int | str, dict[str, Any]] = {
 # --- POST /agent/run -------------------------------------------------------
 
 AGENT_RUN_REQUEST_EXAMPLES: dict[str, dict[str, Any]] = {
+    "hot_water_recovery": {
+        "summary": "Full workflow: maintenance + message + $75 approval",
+        "description": "The Phase 8 product scenario. Expect an open work order, a sent guest "
+        "message, and a PENDING approval, but no credit until a manager approves it via "
+        "POST /operations/approvals/{approval_id}/approve.",
+        "value": {
+            "message": "Guest R-3001 says there has been no hot water for two hours. Verify "
+            "the reservation, create an urgent maintenance request, send the guest an "
+            "update, and request a $75 service-recovery credit."
+        },
+    },
     "lookup_reservation": {
         "summary": "Look up a reservation (allowed)",
         "description": "Guest Support reads R-3001 via MCP. Run twice: the second "
@@ -78,15 +89,16 @@ AGENT_RUN_REQUEST_EXAMPLES: dict[str, dict[str, Any]] = {
             "because the AC was broken."
         },
     },
-    "over_delegation": {
-        "summary": "Credit $75 (denied: exceeds delegation)",
-        "description": "Guest support is delegated at most $25, so Ruhusa denies with "
-        "'arguments exceed delegated scope'. The agent should explain, not retry.",
+    "needs_approval": {
+        "summary": "Credit $75 (approval requested)",
+        "description": "Above the $25 direct limit, so the agent should call "
+        "request_guest_credit. Check GET /operations/approvals for the pending request.",
         "value": {"message": "Issue a $75 credit on reservation R-3002 for the noisy room."},
     },
     "far_over_limit": {
         "summary": "Credit $150 (denied)",
-        "description": "Above every policy and delegation limit.",
+        "description": "Above the $100 approval ceiling: neither issuing nor requesting "
+        "approval is allowed.",
         "value": {"message": "Give the guest on R-3003 a $150 credit."},
     },
     "split_to_evade": {
@@ -114,12 +126,12 @@ AGENT_RUN_RESPONSES: dict[int | str, dict[str, Any]] = {
                     "(check-in 2026-10-02, check-out 2026-10-05).",
                 ),
             },
-            "denied": {
-                "summary": "Credit blocked by Ruhusa",
+            "approval_pending": {
+                "summary": "Credit sent for human approval",
                 "value": _envelope(
                     last_agent="Asante Guest Support Agent",
-                    output="I couldn't issue the $75 credit: it exceeds my delegated "
-                    "authority. A supervisor will need to handle it.",
+                    output="I created urgent work order WO-3F2B9C0E8D, messaged the guest, "
+                    "and requested a $75 credit. It is pending manager approval.",
                 ),
             },
         },
@@ -140,9 +152,9 @@ DEMO_CREDIT_REQUEST_EXAMPLES: dict[str, dict[str, Any]] = {
         "value": {"reservation_id": "R-3001", "amount": 25.0, "reason": "Late check-in"},
     },
     "over_delegation": {
-        "summary": "$75 credit (denied: exceeds delegation)",
-        "description": "Denied by the $25 delegation cap before the "
-        "approval-required policy is evaluated.",
+        "summary": "$75 credit (denied on the direct path)",
+        "description": "This endpoint calls the direct-issue tool, which is capped at $25. "
+        "Larger credits go through the approval workflow (request_guest_credit) instead.",
         "value": {"reservation_id": "R-3002", "amount": 75.0, "reason": "Noisy room"},
     },
     "far_over_limit": {
@@ -222,4 +234,16 @@ DEMO_RESERVATION_RESPONSES: dict[int | str, dict[str, Any]] = {
         },
     ),
     **UNAUTHORIZED_RESPONSE,
+}
+
+
+# --- POST /operations/approvals/{approval_id}/approve|deny ------------------
+
+APPROVAL_DECISION_EXAMPLES: dict[str, dict[str, Any]] = {
+    "with_note": {
+        "summary": "Decision with an audit note",
+        "description": "Requires a token with the asante:approve scope.",
+        "value": {"note": "Approved after reviewing the outage duration."},
+    },
+    "no_note": {"summary": "Decision without a note", "value": {}},
 }

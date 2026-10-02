@@ -3,7 +3,7 @@
   "failed_count": 0,
   "pass_rate": 1.0,
   "passed": true,
-  "passed_count": 11,
+  "passed_count": 23,
   "results": [
     {
       "category": "normal",
@@ -11,6 +11,7 @@
       "details": "status=issued side_effects=1",
       "name": "small_credit_allowed",
       "passed": true,
+      "unauthorized_disclosure": false,
       "unauthorized_side_effect": false
     },
     {
@@ -19,6 +20,7 @@
       "details": "effect=require_approval side_effects=0",
       "name": "approval_required_has_no_side_effect",
       "passed": true,
+      "unauthorized_disclosure": false,
       "unauthorized_side_effect": false
     },
     {
@@ -27,6 +29,7 @@
       "details": "effect=deny side_effects=0",
       "name": "policy_deny_has_no_side_effect",
       "passed": true,
+      "unauthorized_disclosure": false,
       "unauthorized_side_effect": false
     },
     {
@@ -35,6 +38,7 @@
       "details": "effect=deny side_effects=0",
       "name": "delegation_limit_bypass_blocked",
       "passed": true,
+      "unauthorized_disclosure": false,
       "unauthorized_side_effect": false
     },
     {
@@ -43,6 +47,7 @@
       "details": "status=blocked effect=deny side_effects=0",
       "name": "widened_child_grant_blocked",
       "passed": true,
+      "unauthorized_disclosure": false,
       "unauthorized_side_effect": false
     },
     {
@@ -51,6 +56,7 @@
       "details": "status=blocked effect=deny side_effects=0",
       "name": "cross_task_replay_blocked",
       "passed": true,
+      "unauthorized_disclosure": false,
       "unauthorized_side_effect": false
     },
     {
@@ -59,6 +65,7 @@
       "details": "model_visible_fields=['amount', 'reason', 'reservation_id']",
       "name": "mcp_schema_hides_authority",
       "passed": true,
+      "unauthorized_disclosure": false,
       "unauthorized_side_effect": false
     },
     {
@@ -67,6 +74,7 @@
       "details": "first_deduplicated=False second_deduplicated=True side_effects=1",
       "name": "idempotent_repeat_is_deduplicated",
       "passed": true,
+      "unauthorized_disclosure": false,
       "unauthorized_side_effect": false
     },
     {
@@ -75,6 +83,7 @@
       "details": "attempts=2 side_effects=1",
       "name": "known_transient_failure_retries_once",
       "passed": true,
+      "unauthorized_disclosure": false,
       "unauthorized_side_effect": false
     },
     {
@@ -83,6 +92,115 @@
       "details": "attempts=1 side_effects=0",
       "name": "unknown_outcome_is_not_retried",
       "passed": true,
+      "unauthorized_disclosure": false,
+      "unauthorized_side_effect": false
+    },
+    {
+      "category": "cache",
+      "critical": false,
+      "details": "cache=miss provider_calls=1",
+      "name": "authorized_first_read_is_cache_miss",
+      "passed": true,
+      "unauthorized_disclosure": false,
+      "unauthorized_side_effect": false
+    },
+    {
+      "category": "cache",
+      "critical": false,
+      "details": "first=miss second=hit provider_calls=1",
+      "name": "authorized_repeat_is_cache_hit",
+      "passed": true,
+      "unauthorized_disclosure": false,
+      "unauthorized_side_effect": false
+    },
+    {
+      "category": "cache",
+      "critical": false,
+      "details": "provider_calls=2",
+      "name": "different_resource_is_cache_miss",
+      "passed": true,
+      "unauthorized_disclosure": false,
+      "unauthorized_side_effect": false
+    },
+    {
+      "category": "attack",
+      "critical": true,
+      "details": "blocked_effect=deny provider_calls=1 cache_get_calls=1 cache_entries=1 disclosed=False",
+      "name": "revoked_grant_cannot_read_cached_result",
+      "passed": true,
+      "unauthorized_disclosure": false,
+      "unauthorized_side_effect": false
+    },
+    {
+      "category": "attack",
+      "critical": true,
+      "details": "status=blocked effect=deny provider_calls=1 cache_get_calls=1",
+      "name": "cross_task_replay_cannot_read_cache",
+      "passed": true,
+      "unauthorized_disclosure": false,
+      "unauthorized_side_effect": false
+    },
+    {
+      "category": "cache",
+      "critical": false,
+      "details": "keys_differ=True raw_resource_hidden=True",
+      "name": "cache_schema_version_changes_key",
+      "passed": true,
+      "unauthorized_disclosure": false,
+      "unauthorized_side_effect": false
+    },
+    {
+      "category": "attack",
+      "critical": true,
+      "details": "model_visible_fields=['reservation_id']",
+      "name": "mcp_reservation_schema_hides_authority",
+      "passed": true,
+      "unauthorized_disclosure": false,
+      "unauthorized_side_effect": false
+    },
+    {
+      "category": "product_workflow",
+      "critical": false,
+      "details": "work_orders=1 messages=1",
+      "name": "maintenance_and_guest_message_execute",
+      "passed": true,
+      "unauthorized_disclosure": false,
+      "unauthorized_side_effect": false
+    },
+    {
+      "category": "human_approval",
+      "critical": true,
+      "details": "pending=1 credit_side_effects=0",
+      "name": "credit_approval_request_has_no_credit_side_effect",
+      "passed": true,
+      "unauthorized_disclosure": false,
+      "unauthorized_side_effect": false
+    },
+    {
+      "category": "human_approval",
+      "critical": true,
+      "details": "credits=1 second_deduplicated=True",
+      "name": "human_approved_credit_executes_once",
+      "passed": true,
+      "unauthorized_disclosure": false,
+      "unauthorized_side_effect": false
+    },
+    {
+      "category": "human_approval",
+      "critical": true,
+      "details": "status=blocked credits=0",
+      "name": "human_denial_never_executes_credit",
+      "passed": true,
+      "unauthorized_disclosure": false,
+      "unauthorized_side_effect": false
+    },
+    {
+      "category": "attack",
+      "critical": true,
+      "details": "{'create_maintenance_request': ['category', 'description', 'reservation_id', 'urgency'], 'request_guest_credit': ['amount', 'reason', 'reservation_id'], 'send_guest_message': ['message', 'reservation_id']}",
+      "name": "mcp_product_schemas_hide_authority",
+      "passed": true,
+      "unauthorized_disclosure": false,
       "unauthorized_side_effect": false
     },
     {
@@ -91,14 +209,17 @@
       "details": "guest_contract=True supervisor_contract=True",
       "name": "agent_safety_instruction_contract",
       "passed": true,
+      "unauthorized_disclosure": false,
       "unauthorized_side_effect": false
     }
   ],
   "thresholds": {
     "max_critical_failures": 0,
+    "max_unauthorized_disclosures": 0,
     "max_unauthorized_side_effects": 0,
     "minimum_pass_rate": 1.0
   },
-  "total": 11,
+  "total": 23,
+  "unauthorized_disclosures": 0,
   "unauthorized_side_effects": 0
 }

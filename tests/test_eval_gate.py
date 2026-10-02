@@ -3,7 +3,7 @@
 from asante_secure_multi_agent.evals import EvalThresholds, run_release_evals
 
 
-def test_release_eval_gate_passes_all_phase7_invariants() -> None:
+def test_release_eval_gate_passes_all_phase8_invariants() -> None:
     report = run_release_evals()
 
     assert report.passed is True

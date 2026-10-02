@@ -1,4 +1,4 @@
-"""Operator-facing API contracts.
+"""Operator-facing API contracts for Asante property operations.
 
 Identity is intentionally absent from request bodies. The human principal is derived
 exclusively from the authenticated Bearer access token at the HTTP boundary.
@@ -38,6 +38,16 @@ class DemoCreditRequest(BaseModel):
     reason: str = Field(min_length=1, description="Service-recovery reason for the credit.")
 
 
+class ApprovalDecisionRequest(BaseModel):
+    """Optional human note recorded with an approval or denial decision."""
+
+    note: str | None = Field(
+        default=None,
+        max_length=1000,
+        description="Reviewer note stored with the decision for audit.",
+    )
+
+
 class ErrorResponse(BaseModel):
     """Standard FastAPI error body used for documented authentication failures."""
 
@@ -55,11 +65,13 @@ class ServiceInfoResponse(BaseModel):
     health: str
     whoami: str
     mcp: str
+    operations: dict[str, str]
     auth: str
     workload_identity: str
     observability: str
     release_gate: str
     caching: str
+    human_approval: str
     otel_exporter: str
 
 
@@ -187,3 +199,45 @@ class ReservationBlockedResponse(BaseModel):
     status: Literal["blocked"]
     effect: Literal["deny", "require_approval"]
     reason: str
+
+
+class WorkOrderRecord(BaseModel):
+    work_order_id: str
+    reservation_id: str
+    category: str
+    urgency: Literal["low", "medium", "high", "emergency"]
+    description: str
+    status: Literal["open"]
+    created_at: str
+
+
+class GuestMessageRecord(BaseModel):
+    message_id: str
+    reservation_id: str
+    message: str
+    status: Literal["sent"]
+    sent_at: str
+
+
+class ApprovalRecordResponse(BaseModel):
+    approval_id: str
+    action: str
+    task_id: str
+    requested_by: str
+    reservation_id: str
+    amount: float
+    reason: str
+    policy_id: str | None = None
+    status: Literal["pending", "approved", "denied", "executed"]
+    created_at: str
+    decided_at: str | None = None
+    decided_by: str | None = None
+    decision_note: str | None = None
+    executed_at: str | None = None
+    execution_result: dict[str, object] | None = None
+
+
+class ApprovalExecutionResponse(BaseModel):
+    approval: ApprovalRecordResponse
+    execution: dict[str, object]
+    trace_id: str

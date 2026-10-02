@@ -1,13 +1,14 @@
-"""HTTP entrypoint for the Asante secure multi-agent application.
+"""HTTP entrypoint for the Asante secure property-operations application.
 
-Phase 7 adds authorization-aware reservation caching on top of the trusted
-identity -> delegation -> agent -> MCP -> Ruhusa -> execution path. Every cache
-lookup is preceded by live Ruhusa authorization and revalidation, so stale cached
-data cannot bypass revocation or task-bound authority.
+Phase 8 adds the first product workflow on top of the secure agent runtime:
+maintenance triage, guest messaging, and durable human approval for larger
+service-recovery credits. Identity, delegation, MCP, Ruhusa, observability,
+reliability, and authorization-aware caching remain the underlying controls.
 """
 
 from __future__ import annotations
 
+import os
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
@@ -15,17 +16,22 @@ from uuid import uuid4
 
 from agents import Runner
 from agents.tracing import add_trace_processor
-from fastapi import Body, Depends, FastAPI, Path
+from fastapi import Body, Depends, FastAPI, HTTPException, Path
 from opentelemetry.trace import Status, StatusCode
 from ruhusa import TaskContext
 
 from asante_secure_multi_agent.agents import build_guest_support_agent, build_supervisor_agent
 from asante_secure_multi_agent.api_models import (
     AgentRunResponse,
+    ApprovalDecisionRequest,
+    ApprovalExecutionResponse,
+    ApprovalRecordResponse,
     CreditBlockedResponse,
     CreditIssuedResponse,
     CreditRecord,
     DemoCreditRequest,
+    ErrorResponse,
+    GuestMessageRecord,
     HealthResponse,
     ReservationBlockedResponse,
     ReservationFoundResponse,
@@ -33,7 +39,9 @@ from asante_secure_multi_agent.api_models import (
     RunRequest,
     ServiceInfoResponse,
     WhoAmIResponse,
+    WorkOrderRecord,
 )
+from asante_secure_multi_agent.approvals import ApprovalStateError, SQLiteApprovalStore
 from asante_secure_multi_agent.cache import InMemoryCacheStore
 from asante_secure_multi_agent.context import AsanteRunContext
 from asante_secure_multi_agent.identity import AuthenticatedHuman, require_authenticated_human
@@ -45,6 +53,7 @@ from asante_secure_multi_agent.mcp import (
 from asante_secure_multi_agent.openapi_examples import (
     AGENT_RUN_REQUEST_EXAMPLES,
     AGENT_RUN_RESPONSES,
+    APPROVAL_DECISION_EXAMPLES,
     DEMO_CREDIT_REQUEST_EXAMPLES,
     DEMO_CREDIT_RESPONSES,
     DEMO_RESERVATION_RESPONSES,
@@ -54,8 +63,11 @@ from asante_secure_multi_agent.openapi_examples import (
 from asante_secure_multi_agent.reliability import credit_retry_policy_from_env
 from asante_secure_multi_agent.security import (
     build_security_runtime,
+    issue_approval_executor_delegation,
+    issue_guest_support_credit_request_delegation,
     issue_guest_support_delegation,
     issue_guest_support_reservation_delegation,
+    issue_guest_support_service_delegation,
 )
 from asante_secure_multi_agent.telemetry import (
     OpenAIAgentsOpenTelemetryProcessor,
@@ -65,15 +77,20 @@ from asante_secure_multi_agent.telemetry import (
     instrument_fastapi,
 )
 from asante_secure_multi_agent.tools import (
+    ApprovedCreditExecutor,
     GuestCreditLedger,
+    GuestMessageOutbox,
     InMemoryReservationProvider,
+    MaintenanceWorkOrderStore,
     SecuredGuestCreditTool,
+    SecuredGuestOperationsTool,
     SecuredReservationTool,
 )
 
 APP_DESCRIPTION = """
-Asante Secure Multi-Agent is a production-style reference application for **secure
-agentic operations**.
+Asante Secure Multi-Agent is the secure property-operations backend for **Asante Stays**:
+maintenance work orders, guest messaging, and service-recovery credits with durable human
+approval, all executed by AI agents under task-bound, independently authorized authority.
 
 The API demonstrates a complete trust chain:
 
@@ -85,13 +102,22 @@ The API demonstrates a complete trust chain:
 6. **OpenTelemetry** traces and security/reliability metrics.
 7. **Bounded retry + idempotency** for protected credit writes.
 8. **Authorization-aware caching** where every cache hit is preceded by fresh authorization.
-9. **Deterministic release gates** for attack, reliability, and disclosure regressions.
+9. **Durable human approval** for larger credits, executed by a separate trusted workload.
+10. **Deterministic release gates** for attack, reliability, and disclosure regressions.
+
+### Approval separation of duties
+
+Guest Support may *request* a service-recovery credit above $25 (up to $100), but it cannot
+approve or execute that request. Approval decisions require an authenticated human token
+containing `asante:approve`; execution then runs through a separate trusted workload and a
+distinct Ruhusa action.
 
 ### Security semantics
 
 Ruhusa denials are represented as domain responses such as `status=blocked`; they are not
 HTTP authentication errors. HTTP `401` is reserved for missing, invalid, or expired Bearer
-credentials.
+credentials. Approval endpoints additionally return `403` (missing `asante:approve`),
+`404` (unknown approval), and `409` (invalid state transition).
 
 > A cache hit may save an external reservation read, but it may never save the authorization
 > check.
@@ -111,6 +137,10 @@ OPENAPI_TAGS = [
         "description": "Run the authenticated multi-agent workflow through MCP and Ruhusa.",
     },
     {
+        "name": "Operations",
+        "description": "Maintenance work orders, guest messages, and the human approval inbox.",
+    },
+    {
         "name": "Demo / Diagnostics",
         "description": (
             "Direct authenticated control paths for exercising Ruhusa, reliability, and cache "
@@ -118,6 +148,13 @@ OPENAPI_TAGS = [
         ),
     },
 ]
+
+APPROVAL_RESPONSES = {
+    **UNAUTHORIZED_RESPONSE,
+    403: {"model": ErrorResponse, "description": "asante:approve scope is required."},
+    404: {"model": ErrorResponse, "description": "Approval request was not found."},
+    409: {"model": ErrorResponse, "description": "Approval state transition is invalid."},
+}
 
 telemetry = configure_telemetry()
 tracer = get_tracer()
@@ -137,6 +174,16 @@ reservation_tool = SecuredReservationTool(
     reservation_provider,
     reservation_cache,
 )
+approvals = SQLiteApprovalStore(os.getenv("ASANTE_APPROVAL_DB_PATH", ".asante/approvals.db"))
+maintenance_store = MaintenanceWorkOrderStore()
+message_outbox = GuestMessageOutbox()
+operations_tool = SecuredGuestOperationsTool(
+    security,
+    maintenance_store,
+    message_outbox,
+    approvals,
+)
+approved_credit_executor = ApprovedCreditExecutor(security, ledger, approvals)
 trusted_tasks = TrustedTaskRegistry()
 
 AuthenticatedOperator = Annotated[
@@ -148,6 +195,7 @@ guest_operations_mcp = build_guest_operations_mcp_server(
     credit_tool,
     trusted_tasks,
     reservation_tool,
+    operations_tool,
 )
 mcp_http_app = guest_operations_mcp.streamable_http_app(
     json_response=True,
@@ -157,19 +205,20 @@ mcp_http_app = guest_operations_mcp.streamable_http_app(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Run the MCP session manager and flush telemetry during shutdown."""
+    """Run MCP session management and flush durable/runtime resources on shutdown."""
     try:
         async with guest_operations_mcp.session_manager.run():
             yield
     finally:
+        approvals.close()
         telemetry.shutdown()
 
 
 app = FastAPI(
     title="Asante Secure Multi-Agent Application",
-    summary="Secure agent runtime with delegated authorization, MCP, and Ruhusa.",
+    summary="Secure AI property operations for Asante Stays.",
     description=APP_DESCRIPTION,
-    version="0.7.0",
+    version="0.8.0",
     openapi_tags=OPENAPI_TAGS,
     contact={
         "name": "Jamiiz AI Systems",
@@ -192,18 +241,24 @@ async def root() -> dict[str, object]:
     """Return versioned service metadata and local API discovery links."""
     return {
         "name": "Asante Secure Multi-Agent Application",
-        "phase": 7,
+        "phase": 8,
         "status": "running",
         "docs": "/docs",
         "redoc": "/redoc",
         "health": "/health",
         "whoami": "/auth/whoami",
         "mcp": "/mcp/",
+        "operations": {
+            "approvals": "/operations/approvals",
+            "maintenance": "/operations/work-orders",
+            "messages": "/operations/messages",
+        },
         "auth": "Bearer JWT access token",
         "workload_identity": "SPIFFE IDs",
         "observability": "OpenTelemetry",
         "release_gate": "deterministic security + reliability + cache-disclosure evals",
         "caching": "authorization-aware reservation reads",
+        "human_approval": "SQLite-backed durable approval workflow",
         "otel_exporter": telemetry.exporter,
     }
 
@@ -250,7 +305,7 @@ def whoami(
     response_model=AgentRunResponse,
     responses=AGENT_RUN_RESPONSES,
     tags=["Agents"],
-    summary="Run the secure multi-agent workflow",
+    summary="Run the secure Asante property-operations workflow",
 )
 async def run_agent(
     request: Annotated[RunRequest, Body(openapi_examples=AGENT_RUN_REQUEST_EXAMPLES)],
@@ -266,7 +321,7 @@ async def run_agent(
     with tracer.start_as_current_span(
         "asante.agent.run",
         attributes={
-            "asante.workflow": "guest_service_recovery",
+            "asante.workflow": "property_operations",
             "asante.identity.kind": "authenticated_human",
             "asante.delegation.depth": 2,
             "asante.mcp.transport": "streamable_http",
@@ -275,15 +330,19 @@ async def run_agent(
         task = TaskContext(
             task_id=uuid4().hex,
             initiated_by=operator.principal_id,
-            purpose="guest service recovery",
+            purpose="Asante property operations",
             expires_at=datetime.now(UTC) + timedelta(minutes=30),
         )
-        delegation_chain = issue_guest_support_delegation(security, task)
-        reservation_delegation_chain = issue_guest_support_reservation_delegation(security, task)
         context = AsanteRunContext(
             task=task,
-            guest_support_delegation=delegation_chain,
-            guest_support_reservation_delegation=reservation_delegation_chain,
+            guest_support_delegation=issue_guest_support_delegation(security, task),
+            guest_support_reservation_delegation=(
+                issue_guest_support_reservation_delegation(security, task)
+            ),
+            guest_support_service_delegation=issue_guest_support_service_delegation(security, task),
+            guest_support_credit_request_delegation=(
+                issue_guest_support_credit_request_delegation(security, task)
+            ),
         )
         trusted_tasks.register(context)
 
@@ -424,3 +483,128 @@ def dev_get_reservation(
             "initiated_by": operator.principal_id,
             **result,
         }
+
+
+@app.get(
+    "/operations/work-orders",
+    response_model=list[WorkOrderRecord],
+    responses=UNAUTHORIZED_RESPONSE,
+    tags=["Operations"],
+    summary="List maintenance work orders",
+)
+def list_work_orders(_operator: AuthenticatedOperator) -> list[dict[str, object]]:
+    """Return maintenance work orders for the operations dashboard."""
+    return maintenance_store.work_orders
+
+
+@app.get(
+    "/operations/messages",
+    response_model=list[GuestMessageRecord],
+    responses=UNAUTHORIZED_RESPONSE,
+    tags=["Operations"],
+    summary="List outbound guest messages",
+)
+def list_guest_messages(_operator: AuthenticatedOperator) -> list[dict[str, object]]:
+    """Return outbound guest messages for the operations dashboard."""
+    return message_outbox.messages
+
+
+@app.get(
+    "/operations/approvals",
+    response_model=list[ApprovalRecordResponse],
+    responses=UNAUTHORIZED_RESPONSE,
+    tags=["Operations"],
+    summary="List durable human approval requests",
+)
+def list_approvals(_operator: AuthenticatedOperator) -> list[dict[str, object]]:
+    """Return durable approval requests newest first."""
+    return [record.to_dict() for record in approvals.list_requests()]
+
+
+def _require_approval_scope(operator: AuthenticatedHuman) -> None:
+    """Require explicit manager approval authority from the validated token."""
+    if "asante:approve" not in operator.scopes:
+        raise HTTPException(
+            status_code=403,
+            detail="asante:approve scope required for human approval decisions",
+        )
+
+
+@app.post(
+    "/operations/approvals/{approval_id}/approve",
+    response_model=ApprovalExecutionResponse,
+    responses=APPROVAL_RESPONSES,
+    tags=["Operations"],
+    summary="Approve and execute a pending guest credit",
+)
+def approve_credit_request(
+    approval_id: str,
+    request: Annotated[ApprovalDecisionRequest, Body(openapi_examples=APPROVAL_DECISION_EXAMPLES)],
+    operator: AuthenticatedOperator,
+) -> dict[str, object]:
+    """Record human approval and execute the credit through a separate trusted workload."""
+    _require_approval_scope(operator)
+    try:
+        record = approvals.require(approval_id)
+        if record.status == "executed":
+            return {
+                "approval": record.to_dict(),
+                "execution": {**(record.execution_result or {}), "deduplicated": True},
+                "trace_id": current_trace_id(),
+            }
+        record = approvals.decide(
+            approval_id,
+            approved=True,
+            decided_by=operator.principal_id,
+            note=request.note,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ApprovalStateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    task = TaskContext(
+        task_id=uuid4().hex,
+        initiated_by=operator.principal_id,
+        purpose=f"execute approved guest credit {approval_id}",
+        expires_at=datetime.now(UTC) + timedelta(minutes=10),
+    )
+    result = approved_credit_executor.execute(
+        approval=record,
+        task=task,
+        delegation_chain=issue_approval_executor_delegation(security, task),
+    )
+    refreshed = approvals.require(approval_id)
+    return {
+        "approval": refreshed.to_dict(),
+        "execution": result,
+        "trace_id": current_trace_id(),
+    }
+
+
+@app.post(
+    "/operations/approvals/{approval_id}/deny",
+    response_model=ApprovalRecordResponse,
+    responses=APPROVAL_RESPONSES,
+    tags=["Operations"],
+    summary="Deny a pending guest credit",
+)
+def deny_credit_request(
+    approval_id: str,
+    request: Annotated[ApprovalDecisionRequest, Body(openapi_examples=APPROVAL_DECISION_EXAMPLES)],
+    operator: AuthenticatedOperator,
+) -> dict[str, object]:
+    """Persist a human denial; no credit execution occurs."""
+    _require_approval_scope(operator)
+    try:
+        record = approvals.decide(
+            approval_id,
+            approved=False,
+            decided_by=operator.principal_id,
+            note=request.note,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ApprovalStateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return record.to_dict()
